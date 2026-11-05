@@ -11,3 +11,12 @@ pyroporch-sdk.workspace = true
 enigo = "0.6.1"
 open = "5.4.5"
 url = "2.5.8"
+
+[target.'cfg(target_os = "macos")'.dependencies]
+# 0.3.1, the latest stable on crates.io, checked 2026-11-05. For running keyboard work on the main thread.
+dispatch2 = "0.3.1"
+
+# Its own main function, because the test needs the main thread free to do the work.
+[[test]]
+name = "keyboard_thread"
+harness = false

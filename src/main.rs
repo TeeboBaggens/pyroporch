@@ -70,7 +70,25 @@ fn demo_vault(vault: Vault) -> Vault {
     vault
 }
 
+/// On a Mac the server gives up the main thread, because keys pressing keyboard keys need it.
+#[cfg(all(target_os = "macos", feature = "desktop-actions"))]
 fn run_mcp() -> Result<(), String> {
+    std::thread::spawn(|| {
+        let served = serve_mcp();
+        if let Err(error) = &served {
+            eprintln!("{error}");
+        }
+        std::process::exit(i32::from(served.is_err()));
+    });
+    pyroporch_desktop::serve_main_thread()
+}
+
+#[cfg(not(all(target_os = "macos", feature = "desktop-actions")))]
+fn run_mcp() -> Result<(), String> {
+    serve_mcp()
+}
+
+fn serve_mcp() -> Result<(), String> {
     let paths = Paths::from_env();
     let mut ws = Workspace::load_with(paths.clone(), cfg!(feature = "desktop-actions"))?;
     sample_plugin::sync(&mut ws)?;

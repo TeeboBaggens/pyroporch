@@ -3297,6 +3297,7 @@ dependencies = [
 name = "pyroporch-desktop"
 version = "0.1.1"
 dependencies = [
+ "dispatch2",
  "enigo",
  "open",
  "pyroporch-sdk",
