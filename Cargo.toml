@@ -63,14 +63,15 @@ tempfile = "3.27.0"
 # Key derivation is painfully slow without optimisation, even in a debug build.
 [profile.dev.package.argon2]
 opt-level = 3
-# Plugins run in the sandbox, and a screen saver redraws many times a second, which needs these at
-# full speed too.
+# Plugins run in the sandbox, and a screen saver redraws many times a second, which needs these
+# faster too. Not at 3: with wasmi 2.0.0 that crashes on Windows when a plugin calls the app, while
+# the rest is unoptimised (https://github.com/wasmi-labs/wasmi/issues/2061). Release builds are fine.
 [profile.dev.package.wasmi]
-opt-level = 3
+opt-level = 1
 [profile.dev.package.wasmi_core]
-opt-level = 3
+opt-level = 1
 [profile.dev.package.wasmi_ir]
-opt-level = 3
+opt-level = 1
 [profile.dev.package.image]
 opt-level = 3
 [profile.dev.package.elgato-streamdeck]

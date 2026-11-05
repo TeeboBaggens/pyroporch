@@ -69,6 +69,13 @@ fn prepare(bundle: &Path, exe: &Path) -> Result<(), String> {
     std::fs::write(stamp_path, stamp).map_err(fail)
 }
 
+/// Makes the bundle in `folder` without starting it, for the release builds.
+pub fn make_bundle(folder: &Path) -> Result<(), String> {
+    let exe = std::env::current_exe().map_err(|e| e.to_string())?;
+    std::fs::create_dir_all(folder).map_err(|e| e.to_string())?;
+    prepare(&folder.join(BUNDLE_NAME), &exe)
+}
+
 /// Starts the bundled app and waits for it to finish, returning its result. `None` means carry
 /// on here: already bundled, or the bundle couldn't be made.
 pub fn relaunch_in_bundle(args: &[String]) -> Option<i32> {

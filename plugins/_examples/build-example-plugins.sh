@@ -6,7 +6,8 @@ set -e
 cd "$(dirname "$0")/../.."
 
 # A built file records where its source was. These keep anyone's folder names out of it, and make the
-# same source build the same file on any computer.
+# same source build the same file on any Apple Silicon Mac. Other kinds of computer build a different
+# file, so the committed ones should be built on one of those.
 sysroot="$(rustc --print sysroot)"
 registry="${CARGO_HOME:-$HOME/.cargo}/registry/src"
 CARGO_ENCODED_RUSTFLAGS="$(printf '%s\037%s' "--remap-path-prefix=$sysroot/lib/rustlib/src/rust=/rust" "--remap-path-prefix=$registry=/registry")"

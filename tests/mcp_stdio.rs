@@ -33,6 +33,7 @@ impl Client {
         self.stdin.flush().unwrap();
         let mut line = String::new();
         self.stdout.read_line(&mut line).unwrap();
+        assert!(!line.is_empty(), "the server stopped during {method}: {:?}", self.child.wait());
         let reply: Value = serde_json::from_str(&line).unwrap();
         assert_eq!(reply["id"], id, "{reply}");
         reply

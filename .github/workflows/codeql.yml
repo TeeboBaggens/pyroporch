@@ -1,0 +1,48 @@
+# Looks for security problems in the code and the workflows. Findings go to the repo's Security tab.
+name: CodeQL
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  schedule:
+    # Every Monday, as new checks can find problems in code that hasn't changed.
+    - cron: '27 6 * * 1'
+
+permissions:
+  contents: read
+
+jobs:
+  analyze:
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      # To upload what it finds.
+      security-events: write
+    strategy:
+      fail-fast: false
+      matrix:
+        language: [rust, actions]
+    steps:
+      # Pinned by commit, as this job can write to the Security tab. These are the latest stable
+      # releases, checked 2026-11-05: checkout 7.0.1, codeql-action 4.39.3.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      # Reading the Rust needs its compiler, and its dependencies' build scripts need these packages.
+      - name: Install the system's development packages
+        if: matrix.language == 'rust'
+        run: sudo apt-get update && sudo apt-get install -y libudev-dev libxkbcommon-dev libx11-dev libwayland-dev libgl1-mesa-dev
+      - name: Install the pinned Rust
+        if: matrix.language == 'rust'
+        run: rustup toolchain install
+      - uses: github/codeql-action/init@33d7b85da1a04171e211befe2c739303b9a4c066 # v4.39.3
+        with:
+          languages: ${{ matrix.language }}
+          # Neither needs a separate build step.
+          build-mode: none
+          # The standard checks, plus the ones more likely to raise false alarms.
+          queries: security-extended
+      - uses: github/codeql-action/analyze@33d7b85da1a04171e211befe2c739303b9a4c066 # v4.39.3
+        with:
+          category: /language:${{ matrix.language }}

@@ -743,7 +743,8 @@ fn pressing_again_turns_it_off() {
     saver_key(&mut harness, serde_json::json!({"wait_minutes": 5, "start_now": false}));
     click(&mut harness, "Use keys");
     click_key(&mut harness, "Screen Saver");
-    assert!(press_until(&mut harness, |app| app.saver.armed.is_some()));
+    // It shows as on just before the key reports it's done, and a key that's still running ignores presses.
+    assert!(press_until(&mut harness, |app| app.saver.armed.is_some() && app.running.is_empty()));
     assert!(harness.state().saver.playing.is_none(), "this one waits");
     click_key(&mut harness, "Screen Saver: On");
     assert!(press_until(&mut harness, |app| app.saver.armed.is_none()));
@@ -956,6 +957,8 @@ fn a_built_in_module_has_no_remove_button_and_a_plugin_can_be_turned_off() {
     assert!(harness.state().engine.spec("pyroporch.api-call/request").is_some());
 }
 
+// Linux has no tray, so no setting for it.
+#[cfg(not(target_os = "linux"))]
 #[test]
 fn the_menu_bar_icon_colour_is_a_setting_and_saves() {
     let dir = tempfile::tempdir().unwrap();

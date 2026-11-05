@@ -4,15 +4,28 @@ A lean button deck: a grid of keys that open things, press hotkeys, call APIs an
 on screen and with a USB deck, and keeps running in the background. Written in Rust, for macOS,
 Windows and Linux. The name is a play on a deck by a stream: a porch, with a fire.
 
-## Status
-
-Built and tested on macOS. It has loaded on a real USB deck, but not every deck feature has been tried on one. The Windows and Linux builds haven't been run yet: the
-automatic checks in `.github/workflows` will try them once this is on GitHub. Nobody has reviewed its security
-independently.
-
 ## Run it
 
-You'll need [Rust](https://rustup.rs). The right version is pinned in `rust-toolchain.toml`, and rustup fetches it
+Ready-made builds are on the [releases page](https://github.com/TeeboBaggens/pyroporch/releases), for
+Linux, Windows and macOS on Intel/AMD (`x86_64`) and Apple Silicon or other ARM (`aarch64`). There's no
+Windows build for ARM.
+
+| System | Download | To start it |
+|---|---|---|
+| macOS | `pyroporch-<version>-macos-<chip>.zip` | Unzip and open `Pyro Porch.app` |
+| Windows | `pyroporch-<version>-windows-x86_64.zip` | Unzip and run `pyroporch.exe` |
+| Linux | `pyroporch-<version>-linux-<chip>.tar.gz` | Unpack and run `pyroporch` |
+
+The builds aren't signed by Apple or Microsoft yet, so the system warns about them the first time:
+
+- **macOS:** open the app, then choose **Open Anyway** under System Settings > Privacy & Security.
+- **Windows:** choose **More info**, then **Run anyway**.
+
+To check a download, compare it with `SHA256SUMS` on the release, or run
+`gh attestation verify <file> --repo TeeboBaggens/pyroporch` to confirm GitHub built it from this repo.
+For an assistant on a Mac, the program to point at is `Pyro Porch.app/Contents/MacOS/pyroporch`.
+
+To build it yourself, you'll need [Rust](https://rustup.rs). The right version is pinned in `rust-toolchain.toml`, and rustup fetches it
 by itself.
 
 ```sh
@@ -90,8 +103,9 @@ its quick start in the sandbox, and check the guides against what the program re
 
 ## USB decks
 
-Close the deck maker's own app first, because only one program can hold the device. On Linux you
-may need a udev rule to reach the device without root; the `elgato-streamdeck` crate's README has one.
+If you're running the original application, you will need to close it as only one program can occupy the device
+at a time. On Linux you may need a udev rule to reach the device without root; the `elgato-streamdeck` crate's
+README has one.
 
 ## License
 

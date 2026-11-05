@@ -199,7 +199,9 @@ fn the_quick_start_in_the_plugin_guide_works_from_start_to_finish() {
 
     let project = root.join("target/guide-check/dice");
     std::fs::create_dir_all(project.join("src")).unwrap();
-    let manifest = guide_example(guide, "Cargo.toml").replace("../pyroporch/crates/sdk", root.join("crates/sdk").to_str().unwrap());
+    // In forward slashes, as a Windows path's backslashes would be escapes in the file.
+    let sdk = root.join("crates/sdk").to_str().unwrap().trim_start_matches(r"\\?\").replace('\\', "/");
+    let manifest = guide_example(guide, "Cargo.toml").replace("../pyroporch/crates/sdk", &sdk);
     // Its own workspace, because this copy happens to sit inside the project's folder.
     std::fs::write(project.join("Cargo.toml"), format!("{manifest}\n\n[workspace]\n")).unwrap();
     let code = format!("{}\n\n{}\n", guide_example(guide, "lib.rs"), guide_example(guide, "tests"));
@@ -243,8 +245,9 @@ fn the_quick_start_in_the_plugin_guide_works_from_start_to_finish() {
     assert!(report.message.starts_with("rolled"), "{}", report.message);
 }
 
-/// A file built on Windows writes its paths differently, so this can only compare on the others.
-#[cfg(unix)]
+/// These are built on an Apple Silicon Mac. Other kinds of computer build a different file from the
+/// same source, so this can only compare there.
+#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
 #[test]
 fn the_sample_plugins_the_app_carries_are_up_to_date() {
     let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
