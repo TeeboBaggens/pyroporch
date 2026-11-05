@@ -84,6 +84,9 @@ pub struct Vault {
     file_stamp: Option<std::time::SystemTime>,
     key: Option<Zeroizing<[u8; KEY_LEN]>>,
     last_used: Instant,
+    /// The same by the wall clock. A computer's sleep doesn't count on `Instant` everywhere, and
+    /// a vault must not come back from a long sleep still open.
+    last_used_wall: std::time::SystemTime,
     kdf: KdfParams,
 }
 
@@ -160,6 +163,8 @@ pub fn normalize_hosts(hosts: &[String]) -> Result<Vec<String>, String> {
             .or_else(|| host.strip_prefix("http://"))
             .unwrap_or(&host);
         let host = host.trim_end_matches('/');
+        // An address never counts the usual https port as part of its site.
+        let host = host.strip_suffix(":443").unwrap_or(host);
         if host.is_empty() {
             continue;
         }
@@ -187,6 +192,7 @@ impl Vault {
             file_stamp: None,
             key: None,
             last_used: Instant::now(),
+            last_used_wall: std::time::SystemTime::now(),
             kdf,
         };
         vault.reload()?;
@@ -298,11 +304,13 @@ impl Vault {
 
     fn touch(&mut self) {
         self.last_used = Instant::now();
+        self.last_used_wall = std::time::SystemTime::now();
     }
 
     /// Locks if nothing has used the vault for this long. Zero means never.
     pub fn lock_if_idle(&mut self, after: Duration) -> bool {
-        if !after.is_zero() && self.key.is_some() && self.last_used.elapsed() >= after {
+        let idle = self.last_used.elapsed() >= after || self.last_used_wall.elapsed().is_ok_and(|wall| wall >= after);
+        if !after.is_zero() && self.key.is_some() && idle {
             self.lock();
             return true;
         }
@@ -361,6 +369,13 @@ impl Vault {
 
     /// Gives a secret's value, but only for a site it is allowed to go to.
     pub fn reveal_for(&mut self, name: &str, authority: &str) -> Result<Zeroizing<String>, String> {
+        let value = self.reveal_on_timer(name, authority)?;
+        self.touch();
+        Ok(value)
+    }
+
+    /// The same, for a timer. Nobody is there, so it doesn't count as using the vault.
+    pub fn reveal_on_timer(&mut self, name: &str, authority: &str) -> Result<Zeroizing<String>, String> {
         self.reload()?;
         let key = self.key.as_ref().ok_or("the vault is locked")?;
         let file = self.file.as_ref().ok_or("no vault yet")?;
@@ -380,8 +395,21 @@ impl Vault {
             bytes.zeroize();
             "not text".to_string()
         })?;
-        self.touch();
         Ok(Zeroizing::new(text))
+    }
+
+    /// Every secret that may go to this site, so its answers can be checked for them. This isn't
+    /// using the vault, so it doesn't keep it from locking. A locked vault is an error only if
+    /// the site has secrets to check for.
+    pub fn values_for_site(&mut self, authority: &str) -> Result<Vec<Zeroizing<String>>, String> {
+        self.reload()?;
+        let names: Vec<String> = self
+            .list()
+            .into_iter()
+            .filter(|secret| secret.allowed_hosts.iter().any(|host| host == authority))
+            .map(|secret| secret.name)
+            .collect();
+        names.iter().map(|name| self.reveal_on_timer(name, authority)).collect()
     }
 
     /// Remembers the vault key in the system keychain, so this device doesn't need the passphrase.
@@ -395,10 +423,15 @@ impl Vault {
 
     #[cfg(feature = "os-keychain")]
     pub fn forget_on_device(&self) -> Result<(), String> {
-        match keychain_entry()?.delete_credential() {
-            Ok(()) | Err(keyring::Error::NoEntry) => Ok(()),
-            Err(e) => Err(format!("the system keychain refused: {e}")),
+        // The entry from before the app was renamed goes too, or unlocking would still find it.
+        let old = keyring::Entry::new(OLD_KEYCHAIN_SERVICE, "vault-key").map_err(|e| format!("no system keychain: {e}"))?;
+        for entry in [keychain_entry()?, old] {
+            match entry.delete_credential() {
+                Ok(()) | Err(keyring::Error::NoEntry) => {}
+                Err(e) => return Err(format!("the system keychain refused: {e}")),
+            }
         }
+        Ok(())
     }
 
     /// Unlocks from the system keychain. Only ever called when the person asks for it, because the
@@ -407,7 +440,7 @@ impl Vault {
     pub fn unlock_from_device(&mut self) -> Result<(), String> {
         let mut bytes = keychain_entry()?
             .get_secret()
-            .or_else(|_| keyring::Entry::new("leandeck-vault", "vault-key")?.get_secret())
+            .or_else(|_| keyring::Entry::new(OLD_KEYCHAIN_SERVICE, "vault-key")?.get_secret())
             .map_err(|e| format!("nothing usable in the system keychain: {e}"))?;
         if bytes.len() != KEY_LEN {
             bytes.zeroize();
@@ -435,6 +468,9 @@ impl Vault {
 }
 
 #[cfg(feature = "os-keychain")]
+const OLD_KEYCHAIN_SERVICE: &str = "leandeck-vault";
+
+#[cfg(feature = "os-keychain")]
 fn keychain_entry() -> Result<keyring::Entry, String> {
     keyring::Entry::new("pyroporch-vault", "vault-key").map_err(|e| format!("no system keychain: {e}"))
 }
@@ -456,6 +492,34 @@ mod tests {
         let mut vault = Vault::with_kdf(&path, FAST).unwrap();
         vault.create(PASS).unwrap();
         (dir, vault, path)
+    }
+
+    #[test]
+    fn time_asleep_counts_towards_locking() {
+        let (_dir, mut vault, _path) = setup();
+        let idle = std::time::Duration::from_secs(600);
+        assert!(!vault.lock_if_idle(idle));
+        vault.last_used_wall = std::time::SystemTime::now() - idle * 2;
+        assert!(vault.lock_if_idle(idle));
+    }
+
+    #[test]
+    fn the_usual_https_port_is_not_part_of_a_site() {
+        let hosts = normalize_hosts(&["https://API.example.com:443/".to_string(), "b.example:8443".to_string()]).unwrap();
+        assert_eq!(hosts, vec!["api.example.com".to_string(), "b.example:8443".to_string()]);
+    }
+
+    #[test]
+    fn a_timer_using_a_secret_doesnt_keep_the_vault_unlocked() {
+        let (_dir, mut vault, _path) = setup();
+        vault.set("token", "value", &["api.example.com".into()]).unwrap();
+        let idle = std::time::Duration::from_millis(100);
+        std::thread::sleep(idle * 2);
+        vault.reveal_for("token", "api.example.com").unwrap();
+        assert!(!vault.lock_if_idle(idle), "a person using it counts");
+        std::thread::sleep(idle * 2);
+        vault.reveal_on_timer("token", "api.example.com").unwrap();
+        assert!(vault.lock_if_idle(idle), "a timer doesn't");
     }
 
     #[test]

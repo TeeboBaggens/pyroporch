@@ -108,13 +108,17 @@ impl Plugin for DesktopActions {
             "run_command" => {
                 let program = request.text("program");
                 // No shell in between, so nothing in the settings can be read as shell syntax.
-                std::process::Command::new(program)
+                let mut child = std::process::Command::new(program)
                     .args(request.text("args").split_whitespace())
                     .stdin(std::process::Stdio::null())
                     .stdout(std::process::Stdio::null())
                     .stderr(std::process::Stdio::null())
                     .spawn()
                     .map_err(|e| format!("couldn't start {program}: {e}"))?;
+                // Waited for elsewhere, so it doesn't stay behind as a zombie once it finishes.
+                std::thread::spawn(move || {
+                    let _ = child.wait();
+                });
                 Ok(Outcome::message(format!("started {program}")))
             }
             other => Err(format!("unknown action: {other}")),

@@ -71,6 +71,9 @@ Tools carry `title` and annotations saying whether they read, add or can replace
 - It can't change security or assistant settings: `update_settings` leaves them out, including its own access.
 - It can't delete a profile or a page.
 - A request to save a credential in plain text is refused before anything is written.
+- A credential saved in plain text by hand is hidden from what it reads.
+- It sees a profile as last saved in the app. Changes waiting in an autosave file aren't visible to it, and are put together with its own when the person saves.
+- A key it saves can't both refresh on a timer and use a vault secret, unless the person lets assistants use secrets.
 - Keys it presses can't use vault secrets, unless the person turns that on in the app and this device
   remembers the vault.
 - A key it presses can change the deck's brightness, but can't change pages, put the deck to sleep or start the

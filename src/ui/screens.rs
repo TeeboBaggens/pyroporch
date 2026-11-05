@@ -4,7 +4,7 @@ use super::secret_field::{forget_field, labelled_password_field, password_field}
 use super::theme::{Palette, color_hex, parse_color};
 use super::{App, ImportDialog, SecretDialog, SecretTarget, View};
 use eframe::egui::{self, Color32, RichText, Ui};
-use pyroporch_core::policy::Grants;
+use pyroporch_core::policy::{Grants, Pending};
 use pyroporch_core::transfer::{self, FILE_EXTENSION};
 use pyroporch_core::vault::{MIN_PASSPHRASE_CHARS, VaultState};
 use serde_json::Value;
@@ -69,9 +69,9 @@ impl App {
         }
     }
 
-    pub fn remove_plugin(&mut self, id: &str) {
+    pub fn remove_plugin(&mut self, id: &str, folder: &str) {
         self.confirm_remove_plugin = None;
-        match self.engine.remove_plugin(id) {
+        match self.engine.remove_plugin(id, folder) {
             Ok(()) => self.plugin_message = format!("Removed {id}."),
             Err(error) => self.plugin_message = error,
         }
@@ -110,13 +110,14 @@ impl App {
                         ui.label(RichText::new(tag).small().color(color));
                         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                             if !status.builtin {
-                                let asking = confirming.as_deref() == Some(status.id.as_str());
+                                // By folder, because a copied plugin has the same id as the original.
+                                let asking = confirming.as_deref() == Some(status.folder.as_str());
                                 let label = if asking { "Click again to remove" } else { "Remove" };
                                 if ui.button(label).on_hover_text("Takes it out of the plugins folder").clicked() {
                                     if asking {
-                                        remove = Some(status.id.clone());
+                                        remove = Some((status.id.clone(), status.folder.clone()));
                                     } else {
-                                        ask_remove = Some(status.id.clone());
+                                        ask_remove = Some(status.folder.clone());
                                     }
                                 }
                                 if status.enabled {
@@ -209,7 +210,9 @@ impl App {
             self.log(false, error);
         }
         if let Some((plugin, host)) = revoke {
-            let _ = Grants::revoke_host(&self.ws.paths, &plugin, &host);
+            if let Err(error) = Grants::revoke_host(&self.ws.paths, &plugin, &host) {
+                self.log(false, error);
+            }
             self.grants = Grants::load(&self.ws.paths);
             self.engine.refresh_plugins();
         }
@@ -225,11 +228,11 @@ impl App {
         if restore_samples {
             self.restore_samples();
         }
-        if let Some(id) = ask_remove {
-            self.confirm_remove_plugin = Some(id);
+        if let Some(folder) = ask_remove {
+            self.confirm_remove_plugin = Some(folder);
         }
-        if let Some(id) = remove {
-            self.remove_plugin(&id);
+        if let Some((id, folder)) = remove {
+            self.remove_plugin(&id, &folder);
         }
     }
 
@@ -313,7 +316,10 @@ impl App {
                             && let Ok(mut vault) = engine.vault.lock()
                         {
                             match vault.unlock_from_device() {
-                                Ok(()) => form.message.clear(),
+                                Ok(()) => {
+                                    form.message.clear();
+                                    form.passphrase.wipe();
+                                }
                                 Err(error) => {
                                     form.message = error;
                                     form.is_error = true;
@@ -770,24 +776,31 @@ impl App {
                 ui.separator();
             }
         });
+        // Each answer takes its request out of the file as it is now, not this window's copy of
+        // it, so a request that came in since isn't lost.
         if let Some(index) = allow {
-            let request = self.pending.hosts.remove(index);
-            if let Err(error) = Grants::allow_host(&self.ws.paths, &request.plugin, &request.host) {
-                self.log(false, error);
+            let request = self.pending.hosts[index].clone();
+            match Grants::allow_host(&self.ws.paths, &request.plugin, &request.host) {
+                Ok(()) => {
+                    self.log(true, format!("allowed {}", request.host));
+                    let _ = Pending::remove_host(&self.ws.paths, &request.plugin, &request.host);
+                }
+                Err(error) => self.log(false, error),
             }
             self.grants = Grants::load(&self.ws.paths);
             self.engine.refresh_plugins();
-            self.log(true, format!("allowed {}", request.host));
         }
         if let Some(index) = deny {
-            let request = self.pending.hosts.remove(index);
+            let request = self.pending.hosts[index].clone();
+            let _ = Pending::remove_host(&self.ws.paths, &request.plugin, &request.host);
             self.log(true, format!("didn't allow {}", request.host));
         }
         if let Some(index) = dismiss {
-            self.pending.secrets.remove(index);
+            let _ = Pending::remove_secret(&self.ws.paths, &self.pending.secrets[index].name);
         }
         if let Some(index) = enter {
-            let request = self.pending.secrets.remove(index);
+            let request = self.pending.secrets[index].clone();
+            let _ = Pending::remove_secret(&self.ws.paths, &request.name);
             self.secret_dialog = Some(SecretDialog {
                 name: request.name,
                 hosts: request.hosts.join(", "),
@@ -797,7 +810,7 @@ impl App {
             self.show_requests = false;
         }
         if allow.is_some() || deny.is_some() || dismiss.is_some() || enter.is_some() {
-            let _ = self.pending.save(&self.ws.paths);
+            self.pending = Pending::load(&self.ws.paths);
         }
         if !open {
             self.show_requests = false;
@@ -920,6 +933,7 @@ impl App {
         if was_approved {
             key.approve();
         }
-        self.mark_profile_dirty();
+        // The profile the key is in, which may not be the one on screen by now.
+        self.dirty_profiles.insert(target.id.profile.clone(), std::time::Instant::now());
     }
 }

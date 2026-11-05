@@ -13,6 +13,7 @@ use crate::config::{BACK_SLOT, Key, MAX_FOLDER_DEPTH, Page, Preset, Profile, Ste
 use crate::engine::{Block, Engine};
 use crate::paths::audit;
 use crate::policy::{Grants, Pending};
+use crate::security::{find_refs, plaintext_findings};
 use crate::transfer::{MAX_IMAGE_BYTES, store_image};
 use crate::vault::{normalize_hosts, valid_name};
 use pyroporch_sdk::{DeckControl, Trigger};
@@ -97,40 +98,63 @@ fn check_arguments(tool: &Value, args: &Map<String, Value>) -> Result<(), String
             let known: Vec<&str> = properties.keys().map(String::as_str).collect();
             return Err(format!("there's no argument called {name}. This tool takes: {}", known.join(", ")));
         };
-        let matches = match property["type"].as_str() {
-            Some("string") => value.is_string(),
-            Some("integer") => value.is_u64() || value.is_i64(),
-            Some("number") => value.is_number(),
-            Some("boolean") => value.is_boolean(),
-            Some("array") => value.is_array(),
-            Some("object") => value.is_object(),
-            _ => true,
-        };
-        if !matches {
-            return Err(format!("{name} should be of type {}", property["type"].as_str().unwrap_or("other")));
-        }
-        if let Some(minimum) = property["minimum"].as_f64()
-            && let Some(number) = value.as_f64()
-            && number < minimum
-        {
-            return Err(format!("{name} should be at least {minimum}"));
-        }
-        if let Some(maximum) = property["maximum"].as_f64()
-            && let Some(number) = value.as_f64()
-            && number > maximum
-        {
-            return Err(format!("{name} should be at most {maximum}"));
-        }
-        if let Some(options) = property["enum"].as_array()
-            && !options.contains(value)
-        {
-            let list: Vec<String> = options.iter().filter_map(Value::as_str).map(str::to_string).collect();
-            return Err(format!("{name} should be one of: {}", list.join(", ")));
-        }
+        check_argument(name, property, value)?;
     }
     for name in schema["required"].as_array().into_iter().flatten().filter_map(Value::as_str) {
         if !args.contains_key(name) {
             return Err(format!("{name} is required"));
+        }
+    }
+    Ok(())
+}
+
+/// Checks one value against its description, including what's inside a list.
+fn check_argument(name: &str, property: &Value, value: &Value) -> Result<(), String> {
+    let matches = match property["type"].as_str() {
+        Some("string") => value.is_string(),
+        Some("integer") => value.is_u64() || value.is_i64(),
+        Some("number") => value.is_number(),
+        Some("boolean") => value.is_boolean(),
+        Some("array") => value.is_array(),
+        Some("object") => value.is_object(),
+        _ => true,
+    };
+    if !matches {
+        return Err(format!("{name} should be of type {}", property["type"].as_str().unwrap_or("other")));
+    }
+    // Every whole number here is read as this size, and one too big must not count as left out.
+    if property["type"] == "integer" && value.as_u64().is_some_and(|number| number > u64::from(u32::MAX)) {
+        return Err(format!("{name} should be at most {}", u32::MAX));
+    }
+    if let Some(minimum) = property["minimum"].as_f64()
+        && let Some(number) = value.as_f64()
+        && number < minimum
+    {
+        return Err(format!("{name} should be at least {minimum}"));
+    }
+    if let Some(maximum) = property["maximum"].as_f64()
+        && let Some(number) = value.as_f64()
+        && number > maximum
+    {
+        return Err(format!("{name} should be at most {maximum}"));
+    }
+    if let Some(options) = property["enum"].as_array()
+        && !options.contains(value)
+    {
+        let list: Vec<String> = options.iter().filter_map(Value::as_str).map(str::to_string).collect();
+        return Err(format!("{name} should be one of: {}", list.join(", ")));
+    }
+    if let Some(items) = value.as_array() {
+        if property["minItems"].as_u64().is_some_and(|least| (items.len() as u64) < least) {
+            return Err(format!("{name} should have at least {} items", property["minItems"]));
+        }
+        if property["maxItems"].as_u64().is_some_and(|most| items.len() as u64 > most) {
+            return Err(format!("{name} should have at most {} items", property["maxItems"]));
+        }
+        if property.get("items").is_some() {
+            for item in items {
+                check_argument(name, &property["items"], item)?;
+            }
         }
     }
     Ok(())
@@ -252,6 +276,9 @@ fn str_arg<'a>(args: &'a Map<String, Value>, name: &str) -> Option<&'a str> {
 fn required_str<'a>(args: &'a Map<String, Value>, name: &str) -> Result<&'a str, String> {
     str_arg(args, name).filter(|s| !s.is_empty()).ok_or_else(|| format!("{name} is required"))
 }
+
+/// What an assistant sees in place of a credential that's stored in plain text.
+const HIDDEN_CREDENTIAL: &str = "[hidden: a credential in plain text. The person needs to move it to the vault]";
 
 fn u32_arg(args: &Map<String, Value>, name: &str) -> Option<u32> {
     args.get(name).and_then(Value::as_u64).and_then(|n| u32::try_from(n).ok())
@@ -433,7 +460,9 @@ impl McpServer {
             "list_actions" => Ok(self.list_actions()),
             "get_profile" => {
                 let id = self.profile_id(args)?;
-                serde_json::to_value(&self.ws.profiles[&id]).map_err(|e| e.to_string())
+                let mut profile = self.ws.profiles[&id].clone();
+                self.hide_credentials(&mut profile);
+                serde_json::to_value(&profile).map_err(|e| e.to_string())
             }
             "get_settings" => Ok(self.settings_view()),
             "list_secrets" => self.list_secrets(),
@@ -633,6 +662,29 @@ impl McpServer {
             .collect()
     }
 
+    /// A file edited by hand can hold a credential in plain text. It's refused when a key runs,
+    /// and an assistant reading the profile doesn't get to see it either.
+    fn hide_credentials(&self, profile: &mut Profile) {
+        for page in &mut profile.pages {
+            page.for_each_key_mut(&mut |key| {
+                for step in &mut key.steps {
+                    let spec = self.engine.spec(&step.action);
+                    for (name, value) in &mut step.settings {
+                        let one = Map::from_iter([(name.clone(), value.clone())]);
+                        if !plaintext_findings(spec.as_ref(), &one).is_empty() {
+                            *value = Value::String(HIDDEN_CREDENTIAL.into());
+                        }
+                    }
+                }
+            });
+        }
+    }
+
+    fn refreshes_with_secret(&self, step: &Step) -> bool {
+        let refreshes = step.settings.get("refresh_seconds").and_then(Value::as_f64).is_some_and(|seconds| seconds >= 1.0);
+        refreshes && self.engine.is_refreshable(&step.action) && !find_refs(&Value::Object(step.settings.clone()).to_string()).is_empty()
+    }
+
     fn set_key(&mut self, args: &Map<String, Value>) -> Result<Value, String> {
         let (row, col) = (required_u32(args, "row")?, required_u32(args, "col")?);
         let is_folder = args.get("is_folder").and_then(Value::as_bool).unwrap_or(false);
@@ -661,6 +713,11 @@ impl McpServer {
                     Block::NeedsApproval => {}
                 }
             }
+        }
+        // A timer runs in the app, where secrets can be used, so it can't be a way round the
+        // person's choice that an assistant's keys can't use them.
+        if !self.ws.settings.security.mcp_may_use_secrets && steps.iter().any(|step| self.refreshes_with_secret(step)) {
+            refusals.push("a key that refreshes on a timer can't use a vault secret unless the person allows assistants to use secrets".to_string());
         }
         if !refusals.is_empty() {
             return Err(format!("Nothing was saved. {}", refusals.join("; ")));
@@ -810,11 +867,13 @@ impl McpServer {
                 return Err(format!("Nothing was saved. {block}"));
             }
         }
+        // Checked before the old one goes, so a bad colour doesn't lose it.
+        let color = color_arg(args, "color")?;
         self.ws.settings.presets.retain(|p| p.name != name);
         self.ws.settings.presets.push(Preset {
             name: name.clone(),
             icon: str_arg(args, "icon").unwrap_or("").into(),
-            color: color_arg(args, "color")?,
+            color,
             action,
             settings,
         });
@@ -969,9 +1028,17 @@ impl McpServer {
         if !report.navigate.is_empty() {
             message = "That only works from the deck or the app.".into();
         }
+        // The key may have taken a while, and the person may have changed their settings in that
+        // time. Saving what was read before it ran would undo that, access switches included.
+        self.ws.check_reload();
+        let may_save = self.ws.settings.mcp.enabled && !self.ws.settings.mcp.read_only;
         for control in report.deck {
             if matches!(control, DeckControl::Sleep | DeckControl::ScreenSaver(_)) {
                 message = "That only works from the deck or the app.".into();
+                continue;
+            }
+            if !may_save {
+                message = "Assistant access changed while that key ran, so nothing was saved.".into();
                 continue;
             }
             let current = self.ws.settings.hardware.brightness;
@@ -1173,6 +1240,66 @@ mod tests {
         let reply = server.handle_line(&message.to_string()).unwrap();
         let result = &reply["result"];
         (result["isError"].as_bool().unwrap(), result["content"][0]["text"].as_str().unwrap().to_string())
+    }
+
+    #[test]
+    fn a_slow_key_cant_undo_access_turned_off_while_it_ran() {
+        let (dir, mut server) = server();
+        let (failed, text) = call(&mut server, "set_key", json!({
+            "row": 2, "col": 0, "title": "Slow",
+            "steps": [{"action": "core.deck/brighter", "settings": {"step": 10}, "delay_ms": 400}],
+        }));
+        assert!(!failed, "{text}");
+        let path = dir.path().join("config.toml");
+        let writer = std::thread::spawn({
+            let path = path.clone();
+            move || {
+                std::thread::sleep(Duration::from_millis(100));
+                std::fs::write(&path, "[mcp]\nenabled = false\nread_only = true\n").unwrap();
+            }
+        });
+        let (_, text) = call(&mut server, "press_key", json!({"row": 2, "col": 0}));
+        writer.join().unwrap();
+        assert!(text.contains("nothing was saved"), "{text}");
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "[mcp]\nenabled = false\nread_only = true\n");
+    }
+
+    #[test]
+    fn a_plain_credential_in_a_profile_stays_hidden_from_an_assistant() {
+        let (_dir, mut server) = server();
+        let active = server.ws.settings.active_profile.clone();
+        let mut settings = Map::new();
+        settings.insert("password".into(), json!("hunter2"));
+        settings.insert("note".into(), json!("kept"));
+        server.ws.profiles.get_mut(&active).unwrap().pages[0].keys[0].steps = vec![Step { action: "test.fake/call".into(), settings, delay_ms: 0 }];
+        server.ws.save_profile(&active).unwrap();
+        let (failed, text) = call(&mut server, "get_profile", json!({}));
+        assert!(!failed, "{text}");
+        assert!(!text.contains("hunter2"), "{text}");
+        assert!(text.contains("[hidden") && text.contains("kept"), "{text}");
+    }
+
+    #[test]
+    fn a_bad_colour_doesnt_lose_the_preset_being_replaced() {
+        let (_dir, mut server) = server();
+        let preset = json!({"name": "P", "action": "test.fake/call", "settings": {}, "color": "#112233"});
+        assert!(!call(&mut server, "add_preset", preset).0);
+        let bad = json!({"name": "P", "action": "test.fake/call", "settings": {}, "color": "not a colour"});
+        assert!(call(&mut server, "add_preset", bad).0);
+        assert_eq!(server.ws.settings.presets[0].color, "#112233");
+    }
+
+    #[test]
+    fn a_bad_folder_or_page_is_refused_rather_than_acting_on_another_screen() {
+        let (_dir, mut server) = server();
+        let before = call(&mut server, "get_profile", json!({})).1;
+        for bad in [json!([["a", "b"]]), json!([1, 4]), json!([["x"]]), json!([[1, 2, 3]]), json!([[5_000_000_000u64, 0]])] {
+            let (failed, text) = call(&mut server, "clear_key", json!({"row": 0, "col": 0, "folder": bad}));
+            assert!(failed, "{text}");
+        }
+        let (failed, text) = call(&mut server, "clear_key", json!({"row": 0, "col": 0, "page": 5_000_000_000u64}));
+        assert!(failed, "{text}");
+        assert_eq!(call(&mut server, "get_profile", json!({})).1, before, "nothing changed");
     }
 
     #[test]

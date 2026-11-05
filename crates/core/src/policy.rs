@@ -38,11 +38,20 @@ pub struct Grants {
 }
 
 impl Grants {
+    /// For reading what's allowed: a file with a mistake allows nothing. Anything that goes on to
+    /// save must use `try_load`, or it would write over the file.
     pub fn load(paths: &Paths) -> Self {
-        std::fs::read_to_string(paths.grants())
-            .ok()
-            .and_then(|text| toml::from_str(&text).ok())
-            .unwrap_or_default()
+        Self::try_load(paths).unwrap_or_default()
+    }
+
+    /// No file means nothing has been granted yet. A file that can't be read is an error.
+    pub fn try_load(paths: &Paths) -> Result<Self, String> {
+        let text = match std::fs::read_to_string(paths.grants()) {
+            Ok(text) => text,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Self::default()),
+            Err(e) => return Err(format!("grants.toml: {e}. It wasn't changed.")),
+        };
+        toml::from_str(&text).map_err(|e| format!("grants.toml: {}. It wasn't changed.", e.message()))
     }
 
     pub fn save(&self, paths: &Paths) -> Result<(), String> {
@@ -51,7 +60,7 @@ impl Grants {
     }
 
     pub fn allow_host(paths: &Paths, plugin: &str, host: &str) -> Result<(), String> {
-        let mut grants = Self::load(paths);
+        let mut grants = Self::try_load(paths)?;
         let grant = grants.plugins.entry(plugin.to_string()).or_default();
         if !grant.http_hosts.iter().any(|h| h == host) {
             grant.http_hosts.push(host.to_string());
@@ -60,7 +69,7 @@ impl Grants {
     }
 
     pub fn revoke_host(paths: &Paths, plugin: &str, host: &str) -> Result<(), String> {
-        let mut grants = Self::load(paths);
+        let mut grants = Self::try_load(paths)?;
         if let Some(grant) = grants.plugins.get_mut(plugin) {
             grant.http_hosts.retain(|h| h != host);
         }
@@ -123,6 +132,20 @@ impl Pending {
         write_private(&paths.pending(), text.as_bytes()).map_err(|e| e.to_string())
     }
 
+    /// Takes one answered request out. Read fresh, so requests that came in since aren't lost.
+    pub fn remove_host(paths: &Paths, plugin: &str, host: &str) -> Result<(), String> {
+        let mut pending = Self::load(paths);
+        pending.hosts.retain(|r| !(r.plugin == plugin && r.host == host));
+        pending.save(paths)
+    }
+
+    /// The same for a secret.
+    pub fn remove_secret(paths: &Paths, name: &str) -> Result<(), String> {
+        let mut pending = Self::load(paths);
+        pending.secrets.retain(|r| r.name != name);
+        pending.save(paths)
+    }
+
     pub fn request_host(paths: &Paths, plugin: &str, host: &str, reason: &str) {
         let mut pending = Self::load(paths);
         if !pending.hosts.iter().any(|r| r.plugin == plugin && r.host == host) {
@@ -166,6 +189,34 @@ fn is_loopback(url: &url::Url) -> bool {
     }
 }
 
+/// The longest form a secret can appear in: plain, base64 or encoded for an address.
+fn longest_copy(secrets: &[String]) -> usize {
+    secrets.iter().map(|secret| (secret.len().div_ceil(3) * 4).max(secret.len() * 3)).max().unwrap_or(0)
+}
+
+fn push_filled(out: &mut String, value: &str, in_address: bool) {
+    if in_address {
+        out.extend(url::form_urlencoded::byte_serialize(value.as_bytes()));
+    } else {
+        out.push_str(value);
+    }
+}
+
+/// Blanks the secrets in an answer and only then cuts it to size. What's left at the very end of
+/// a long answer may be the start of a secret that was cut off, so that part goes too.
+fn clean_body(bytes: &[u8], secrets: &[String], limit: usize) -> (String, bool) {
+    let mut body = scrub(&String::from_utf8_lossy(bytes), secrets);
+    if bytes.len() <= limit {
+        return (body, false);
+    }
+    let mut keep = body.len().saturating_sub(longest_copy(secrets)).min(limit);
+    while !body.is_char_boundary(keep) {
+        keep -= 1;
+    }
+    body.truncate(keep);
+    (body, true)
+}
+
 /// The plugin's view of the app. One is made for each run, holding what that plugin may use.
 pub struct PolicyHost {
     pub plugin_id: String,
@@ -177,6 +228,8 @@ pub struct PolicyHost {
     pub secrets_allowed: bool,
     /// Who pressed the key, for the activity record.
     pub actor: String,
+    /// False for a timer: nobody is there, so it doesn't keep the vault from locking.
+    pub counts_as_use: bool,
     /// What the person has allowed, read the first time it is needed rather than for every
     /// request.
     pub grants: OnceLock<Grants>,
@@ -190,8 +243,9 @@ impl PolicyHost {
 }
 
 impl PolicyHost {
-    /// Replaces the placeholders in a piece of text, remembering what was put in.
-    fn fill(&self, text: &str, authority: &str, used: &mut Vec<Zeroizing<String>>) -> Result<String, String> {
+    /// Replaces the placeholders in a piece of text, remembering what was put in. In an address,
+    /// a value is encoded, so what's in it can't change the address around it.
+    fn fill(&self, text: &str, authority: &str, in_address: bool, used: &mut Vec<Zeroizing<String>>) -> Result<String, String> {
         let refs = find_refs(text);
         if refs.is_empty() {
             return Ok(text.to_string());
@@ -211,17 +265,21 @@ impl PolicyHost {
             if !self.any_secret && !allowed.contains(&reference.name) {
                 return Err(format!("this plugin wasn't given access to the secret {}", reference.name));
             }
-            let value = vault.reveal_for(&reference.name, authority)?;
+            let value = if self.counts_as_use {
+                vault.reveal_for(&reference.name, authority)?
+            } else {
+                vault.reveal_on_timer(&reference.name, authority)?
+            };
             out.push_str(&text[at..reference.range.start]);
             match &reference.basic_user {
                 Some(user) => {
                     use base64::Engine as _;
                     let pair = Zeroizing::new(format!("{user}:{}", value.as_str()));
                     let encoded = base64::engine::general_purpose::STANDARD.encode(pair.as_bytes());
-                    out.push_str(&encoded);
+                    push_filled(&mut out, &encoded, in_address);
                     used.push(Zeroizing::new(encoded));
                 }
-                None => out.push_str(&value),
+                None => push_filled(&mut out, &value, in_address),
             }
             at = reference.range.end;
             used.push(value);
@@ -261,18 +319,28 @@ impl Host for PolicyHost {
             other => return Err(format!("unsupported kind of address: {other}")),
         }
 
-        let mut used = Vec::new();
-        let url = self.fill(&request.url, &authority, &mut used)?;
+        // Everything that may go to this site is looked for in the answer, not only what this
+        // request filled in: an earlier request may have left a secret there to be read back.
+        // Without them the answer can't be checked, so it's refused before anything is sent.
+        let mut used = self.vault.lock().map_err(|_| "the vault is unavailable")?.values_for_site(&authority).map_err(|e| {
+            format!("{authority} has vault secrets, and its answer can't be checked for them: {e}. Unlock the vault in the app.")
+        })?;
+        let url = self.fill(&request.url, &authority, true, &mut used)?;
         let mut builder = ureq::http::Request::builder().method(method.as_str()).uri(url);
         for (name, value) in &request.headers {
-            let value = self.fill(value, &authority, &mut used)?;
+            // These decide which site or how much of the request a server reads, and a secret is
+            // only approved for the site in the address.
+            if APP_ONLY_HEADERS.contains(&name.trim().to_lowercase().as_str()) {
+                return Err(format!("the {name} header is set by the app, so it can't be chosen here"));
+            }
+            let value = self.fill(value, &authority, false, &mut used)?;
             if value.contains(['\r', '\n']) || name.contains(['\r', '\n', ':']) {
                 return Err("a header contains a line break, so it was refused".into());
             }
             builder = builder.header(name.as_str(), value);
         }
         let body = match &request.body {
-            Some(body) => Some(self.fill(body, &authority, &mut used)?),
+            Some(body) => Some(self.fill(body, &authority, false, &mut used)?),
             None => None,
         };
 
@@ -281,6 +349,8 @@ impl Host for PolicyHost {
         let agent: ureq::Agent = ureq::Agent::config_builder()
             .http_status_as_error(false)
             .max_redirects(0)
+            // Traffic to this computer stays on it, whatever proxy is set.
+            .proxy(if is_loopback(&parsed) { None } else { ureq::Proxy::try_from_env() })
             .timeout_global(Some(Duration::from_millis(timeout)))
             .build()
             .into();
@@ -308,21 +378,21 @@ impl Host for PolicyHost {
             .headers()
             .get("content-type")
             .and_then(|v| v.to_str().ok())
-            .map(str::to_string);
+            .map(clean);
         let mut bytes = Vec::new();
+        // A little past the limit, so a secret across the cut can still be recognized.
         let read = response
             .body_mut()
             .as_reader()
-            .take(MAX_RESPONSE_BYTES + 1)
+            .take(MAX_RESPONSE_BYTES + 1 + longest_copy(&secrets) as u64)
             .read_to_end(&mut bytes);
         read.map_err(|e| clean(&format!("couldn't read the answer: {e}")))?;
-        let truncated = bytes.len() as u64 > MAX_RESPONSE_BYTES;
-        bytes.truncate(MAX_RESPONSE_BYTES as usize);
+        let (body, truncated) = clean_body(&bytes, &secrets, MAX_RESPONSE_BYTES as usize);
         audit(&self.paths, &self.actor, &format!("{} {method} {authority} answered {status}", self.plugin_id));
         Ok(HttpResponse {
             status,
             content_type,
-            body: clean(&String::from_utf8_lossy(&bytes)),
+            body,
             truncated,
         })
     }
@@ -339,6 +409,9 @@ impl Host for PolicyHost {
             .map_or(0, |d| d.as_millis() as u64)
     }
 }
+
+/// Headers a request can't choose for itself.
+const APP_ONLY_HEADERS: [&str; 7] = ["host", "content-length", "transfer-encoding", "connection", "te", "trailer", "upgrade"];
 
 #[cfg(test)]
 mod tests {
@@ -387,6 +460,7 @@ mod tests {
             any_secret,
             secrets_allowed: true,
             actor: "test".into(),
+            counts_as_use: true,
             grants: OnceLock::new(),
         };
         (dir, host)
@@ -399,6 +473,85 @@ mod tests {
             headers,
             ..HttpRequest::default()
         }
+    }
+
+    #[test]
+    fn a_secret_that_this_request_didnt_fill_in_is_still_blanked_from_the_answer() {
+        let (port, server) = serve_once(
+            "HTTP/1.1 200 OK\r\nContent-Type: text/s3cret-value\r\nContent-Length: 18\r\nConnection: close\r\n\r\nread: s3cret-value",
+        );
+        let (_dir, host) = setup(true);
+        let authority = format!("127.0.0.1:{port}");
+        Grants::allow_host(&host.paths, "test.plugin", &authority).unwrap();
+        host.vault.lock().unwrap().set("token", "s3cret-value", std::slice::from_ref(&authority)).unwrap();
+        let answer = host.http(&get(format!("http://{authority}/"), vec![])).unwrap();
+        server.join().unwrap();
+        assert_eq!(answer.body, "read: •••");
+        assert_eq!(answer.content_type.as_deref(), Some("text/•••"));
+    }
+
+    #[test]
+    fn an_answer_that_cant_be_checked_is_refused_before_anything_is_sent() {
+        let (_dir, host) = setup(true);
+        let authority = "127.0.0.1:9";
+        Grants::allow_host(&host.paths, "test.plugin", authority).unwrap();
+        let mut vault = host.vault.lock().unwrap();
+        vault.set("token", "s3cret-value", &[authority.to_string()]).unwrap();
+        vault.lock();
+        drop(vault);
+        let error = host.http(&get(format!("http://{authority}/"), vec![])).unwrap_err();
+        assert!(error.contains("the vault is locked"), "{error}");
+    }
+
+    #[test]
+    fn a_secret_in_an_address_cant_change_the_address() {
+        let (port, server) = serve_once("HTTP/1.1 200 OK\r\nContent-Length: 0\r\nConnection: close\r\n\r\n");
+        let (_dir, host) = setup(true);
+        let authority = format!("127.0.0.1:{port}");
+        Grants::allow_host(&host.paths, "test.plugin", &authority).unwrap();
+        host.vault.lock().unwrap().set("token", "a&b=c d", std::slice::from_ref(&authority)).unwrap();
+        host.http(&get(format!("http://{authority}/x?key={{{{secret:token}}}}"), vec![])).unwrap();
+        assert!(server.join().unwrap().starts_with("GET /x?key=a%26b%3Dc+d HTTP"));
+    }
+
+    #[test]
+    fn a_request_cant_choose_the_headers_that_decide_where_it_goes() {
+        let (_dir, host) = setup(true);
+        Grants::allow_host(&host.paths, "test.plugin", "api.example.com").unwrap();
+        for name in ["Host", "host", "Transfer-Encoding", "Content-Length"] {
+            let headers = vec![(name.to_string(), "other.example".to_string())];
+            let error = host.http(&get("https://api.example.com/".into(), headers)).unwrap_err();
+            assert!(error.contains("set by the app"), "{error}");
+        }
+    }
+
+    #[test]
+    fn a_secret_across_the_size_limit_doesnt_survive_in_part() {
+        let secrets = vec!["s3cret-value".to_string()];
+        let mut bytes = vec![b'x'; 100];
+        bytes.extend_from_slice(b"s3cret-value");
+        bytes.extend_from_slice(b"s3cret-v");
+        for limit in 95..=115 {
+            let (body, truncated) = clean_body(&bytes, &secrets, limit);
+            assert!(truncated);
+            assert!(body.len() <= limit);
+            assert!(!body.contains("s3cret") && !body.ends_with('s'), "{limit}: {body}");
+        }
+        let (body, truncated) = clean_body(b"short s3cret-value", &secrets, 100);
+        assert_eq!((body.as_str(), truncated), ("short •••", false));
+    }
+
+    #[test]
+    fn answering_one_request_keeps_the_ones_that_came_in_since() {
+        let (_dir, host) = setup(true);
+        Pending::request_host(&host.paths, "a", "one.example", "");
+        Pending::request_host(&host.paths, "a", "two.example", "");
+        Pending::request_secret(&host.paths, "s", &[], "");
+        Pending::remove_host(&host.paths, "a", "one.example").unwrap();
+        let pending = Pending::load(&host.paths);
+        assert_eq!(pending.hosts.iter().map(|r| r.host.as_str()).collect::<Vec<_>>(), vec!["two.example"]);
+        Pending::remove_secret(&host.paths, "s").unwrap();
+        assert!(Pending::load(&host.paths).secrets.is_empty());
     }
 
     #[test]

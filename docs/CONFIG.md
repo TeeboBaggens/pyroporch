@@ -11,7 +11,10 @@ Everything lives in plain TOML files in one folder, which the Settings screen ca
 Set `PYROPORCH_HOME` to use another folder. On macOS and Linux, files are readable only by your user account.
 
 **Edits are picked up within a second, while the app is running.** A file with a mistake is ignored, the
-last good copy stays in use, and the app shows what's wrong.
+last good copy stays in use, and the app shows what's wrong. The file itself is left alone: nothing is saved
+over it until it's fixed. If `config.toml` can't be read when the app starts, there is no good copy to use, so
+it runs on the default settings with assistant access off. If `grants.toml` has a mistake, plugins from the
+plugins folder stay off until it's fixed.
 
 ## `config.toml`
 
@@ -54,6 +57,24 @@ secret = "{{secret:home_token}}"
 
 The app also keeps `version`, for the file's format, and `sample_hashes`, for which samples it has installed.
 Leave those alone. Anything left out of the file takes the value shown above.
+
+## Saving
+
+The Save button at the top of the window, or Cmd/Ctrl+S, puts the current profile in its file. Until then,
+changes are kept in the `autosave` folder a moment after each edit, so nothing a program or an assistant wrote to
+the profile's file gets overwritten, and keys on the deck already use your changes:
+
+| The profile | Its autosave file |
+|---|---|
+| Has been saved | `autosave/<name>_autosave.toml` |
+| Has never been saved | `autosave/<date>_<time>_autosave.toml` |
+
+Saving puts your changes together with anything else that changed in the file, and removes the autosave. If the
+app closes first, the changes come back the next time it starts, still unsaved. An assistant sees a profile as
+it was last saved.
+
+Settings have no Save button. They go to `config.toml` straight away, because switches such as assistant access
+have to count at once, and each save keeps anything another program changed in the file.
 
 ## `profiles/<name>.toml`
 
@@ -146,6 +167,7 @@ keys holding a plain credential are left out, and everything else needs the pers
 | `grants.toml` | What you've allowed: sites and plugins |
 | `pending.toml` | Requests waiting for your answer |
 | `audit.log` | What ran and what changed. It names sites only, never full addresses or values |
+| `autosave/` | Changes not saved yet. See [Saving](#saving). Safe to delete, which throws those changes away |
 | `plugins/<name>/` | Plugins, including the two samples, API Calls and Screen Saver. Remove what you don't want. A folder whose name starts with `.` or `_` is ignored |
 | `plugins/README.md` | How to write a plugin. The app keeps it up to date |
 | `images/` | Key pictures, named after their contents |

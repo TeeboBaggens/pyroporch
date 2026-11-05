@@ -38,6 +38,10 @@ impl Paths {
     pub fn profile(&self, id: &str) -> PathBuf {
         self.profiles_dir().join(format!("{id}.toml"))
     }
+    /// Unsaved work on profiles. Apart from the profiles, so none of it is taken for one.
+    pub fn autosave_dir(&self) -> PathBuf {
+        self.root.join("autosave")
+    }
     pub fn plugins_dir(&self) -> PathBuf {
         self.root.join("plugins")
     }
@@ -75,7 +79,7 @@ impl Paths {
 
     /// Creates the folders, readable only by this user.
     pub fn ensure(&self) -> std::io::Result<()> {
-        for dir in [self.root.clone(), self.profiles_dir(), self.plugins_dir(), self.images_dir()] {
+        for dir in [self.root.clone(), self.profiles_dir(), self.autosave_dir(), self.plugins_dir(), self.images_dir()] {
             std::fs::create_dir_all(&dir)?;
             restrict(&dir, true)?;
         }
@@ -101,7 +105,10 @@ pub fn write_private(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
     let dir = path.parent().unwrap_or_else(|| Path::new("."));
     std::fs::create_dir_all(dir)?;
     let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("file");
-    let temp = dir.join(format!(".{name}.{}.tmp", std::process::id()));
+    // Unique for each save, because two threads of this process can save the same file.
+    static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let turn = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let temp = dir.join(format!(".{name}.{}.{turn}.tmp", std::process::id()));
     let result = (|| {
         // Created private to begin with: a vault file must never be readable by anyone else,
         // not even for the moment before it is moved into place.

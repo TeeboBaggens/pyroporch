@@ -356,6 +356,39 @@ fn host() -> HostHandle {
 }
 
 #[test]
+fn a_plugin_that_calls_the_app_from_its_own_allocator_is_stopped() {
+    // Without a stop this goes on until the app's own stack runs out, which takes the app down.
+    let source = hostile("", "(drop (call $host (i32.const 0) (i32.const 0))) i64.const 0").replace(
+        r#"(func (export "ld_alloc") (param i32) (result i32)"#,
+        r#"(func (export "ld_alloc") (param i32) (result i32) (drop (call $host (i32.const 0) (i32.const 0)))"#,
+    );
+    let plugin = WasmPlugin::load(source.as_bytes()).unwrap();
+    let error = plugin.run(&press(), &host()).unwrap_err();
+    assert!(error.contains("stopped"), "{error}");
+}
+
+#[test]
+fn a_plugin_cannot_get_round_the_memory_limit_with_more_memories_or_tables() {
+    for extra in ["(memory 1024)", "(table 200000000 funcref)", "(table 1 funcref) (table 1 funcref)"] {
+        let source = hostile(extra, "i64.const 0");
+        assert!(WasmPlugin::load(source.as_bytes()).is_err(), "{extra}");
+    }
+    let fine = hostile("(table 1000 funcref)", "i64.const 0");
+    assert!(WasmPlugin::load(fine.as_bytes()).is_ok());
+}
+
+#[test]
+fn a_plugin_that_stopped_starts_again_clean() {
+    // Leaves a mark in its memory and stops one way. If the mark were still there at the next
+    // run it would stop another way, so the same error twice means it started again clean.
+    let body = "(if (i32.load (i32.const 8)) (then unreachable)) (i32.store (i32.const 8) (i32.const 1)) (drop (i32.div_s (i32.const 1) (i32.const 0))) i64.const 0";
+    let plugin = WasmPlugin::load(hostile("", body).as_bytes()).unwrap();
+    let first = plugin.run(&press(), &host()).unwrap_err();
+    let second = plugin.run(&press(), &host()).unwrap_err();
+    assert_eq!(first, second);
+}
+
+#[test]
 fn a_plugin_that_never_stops_is_stopped() {
     let plugin = WasmPlugin::load_with_fuel(hostile("", "(loop $forever (br $forever)) i64.const 0").as_bytes(), SMALL_FUEL).unwrap();
     let error = plugin.run(&press(), &host()).unwrap_err();

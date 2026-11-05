@@ -66,9 +66,42 @@ fn all_files(dir: &std::path::Path) -> String {
     text
 }
 
-fn wait_for_save(harness: &mut Harness<'_, App>) {
+fn wait_for_autosave(harness: &mut Harness<'_, App>) {
     std::thread::sleep(SAVE_DELAY + Duration::from_millis(50));
     settle(harness);
+}
+
+/// Lets changes reach the autosave file, then saves the current profile as the Save button does.
+fn wait_for_save(harness: &mut Harness<'_, App>) {
+    wait_for_autosave(harness);
+    if harness.state().active_has_changes() {
+        harness.state_mut().save_active_profile();
+    }
+    settle(harness);
+}
+
+#[test]
+fn changes_stay_in_an_autosave_file_until_the_save_button_is_pressed() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut harness = harness(&dir);
+    settle(&mut harness);
+    harness.get_by_label("Saved");
+    click(&mut harness, "Website");
+    let title = harness.get_by_role_and_label(Role::TextInput, "Title");
+    title.focus();
+    title.type_text(" Two");
+    settle(&mut harness);
+    wait_for_autosave(&mut harness);
+
+    let main = dir.path().join("profiles/default.toml");
+    let autosave = dir.path().join("autosave/default_autosave.toml");
+    assert!(!std::fs::read_to_string(&main).unwrap().contains("Website Two"));
+    assert!(std::fs::read_to_string(&autosave).unwrap().contains("Website Two"));
+
+    click(&mut harness, "Save");
+    assert!(std::fs::read_to_string(&main).unwrap().contains("Website Two"));
+    assert!(!autosave.exists());
+    harness.get_by_label("Saved");
 }
 
 fn type_into(harness: &mut Harness<'_, App>, placeholder_index: usize, text: &str) {
@@ -822,7 +855,8 @@ fn removing_the_screen_saver_while_it_plays_stops_it_cleanly() {
     settle(&mut harness);
     harness.state_mut().start_on("saver:Snake");
     assert!(press_until(&mut harness, |app| app.saver.playing.as_ref().is_some_and(|playing| playing.frame.is_some())));
-    harness.state_mut().remove_plugin("pyroporch.screensaver");
+    let folder = harness.state().engine.plugin_statuses().into_iter().find(|s| s.id == "pyroporch.screensaver").unwrap().folder;
+    harness.state_mut().remove_plugin("pyroporch.screensaver", &folder);
     assert!(press_until(&mut harness, |app| app.saver.playing.is_none()));
     assert!(harness.state().activity.front().unwrap().text.contains("the screen saver stopped"));
 }

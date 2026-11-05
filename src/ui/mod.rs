@@ -169,9 +169,13 @@ pub struct App {
     _lock: Option<instance::Lock>,
     has_lock: bool,
     tray: Option<tray::Tray>,
+    // Only read on macOS, where the Dock icon can bring a hidden window back.
+    #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
     hidden: bool,
     #[cfg(target_os = "macos")]
     was_active: bool,
+    /// The vault was open at the last look, to notice it closing.
+    vault_was_open: bool,
     /// The profiles with unsaved changes, and when each was last edited. The profile is named,
     /// because the person may switch to another one before the change is saved.
     dirty_profiles: HashMap<String, Instant>,
@@ -191,7 +195,7 @@ pub struct App {
 }
 
 impl App {
-    pub fn new(egui_ctx: &egui::Context, ws: Workspace, engine: Arc<Engine>, launch: Launch) -> Self {
+    pub fn new(egui_ctx: &egui::Context, mut ws: Workspace, engine: Arc<Engine>, launch: Launch) -> Self {
         let Launch { screenshot, lock } = launch;
         let (done_tx, done_rx) = channel();
         let (effect_tx, effect_rx) = channel();
@@ -221,6 +225,7 @@ impl App {
                 done: Arc::new(Mutex::new(None)),
             }
         });
+        let recovered = ws.recover_autosaves();
         let pending = Pending::load(&ws.paths);
         let grants = Grants::load(&ws.paths);
         let last_brightness = ws.settings.hardware.brightness;
@@ -268,6 +273,7 @@ impl App {
             has_lock,
             tray,
             hidden: false,
+            vault_was_open: false,
             #[cfg(target_os = "macos")]
             was_active: false,
             dirty_profiles: HashMap::new(),
@@ -286,6 +292,9 @@ impl App {
             shot,
         };
         app.apply_theme(egui_ctx);
+        for id in recovered {
+            app.log(true, format!("brought back unsaved changes to {id}. Press Save to keep them"));
+        }
         app
     }
 
@@ -369,6 +378,8 @@ impl App {
 
     pub fn mark_profile_dirty(&mut self) {
         self.dirty_profiles.insert(self.active_id(), Instant::now());
+        // A live title belongs to what the key was. The next run brings back a current one.
+        self.live_titles.clear();
     }
 
     /// Reads the requests and allowances again, but only if their files have changed.
@@ -507,7 +518,24 @@ impl App {
         self.mark_settings_dirty();
     }
 
-    /// Saves what changed, a moment after the last edit.
+    /// Puts the current profile in its own file. Assistants see it from then on.
+    pub fn save_active_profile(&mut self) {
+        let id = self.active_id();
+        self.dirty_profiles.remove(&id);
+        match self.ws.save_profile(&id) {
+            Ok(()) => self.log(true, format!("saved {id}")),
+            Err(error) => self.log(false, format!("couldn't save: {error}")),
+        }
+    }
+
+    /// Whether the current profile has changes that aren't in its own file.
+    pub fn active_has_changes(&self) -> bool {
+        let id = self.active_id();
+        self.dirty_profiles.contains_key(&id) || self.ws.has_unsaved(&id)
+    }
+
+    /// Keeps what changed in an autosave file, a moment after the last edit. Settings go straight
+    /// to their file, because switches such as assistant access have to count straight away.
     fn autosave(&mut self) {
         let due: Vec<String> = self
             .dirty_profiles
@@ -517,8 +545,8 @@ impl App {
             .collect();
         for id in due {
             self.dirty_profiles.remove(&id);
-            if let Err(error) = self.ws.save_profile(&id) {
-                self.log(false, format!("couldn't save: {error}"));
+            if let Err(error) = self.ws.autosave_profile(&id) {
+                self.log(false, format!("couldn't autosave: {error}"));
             }
         }
         if self.dirty_settings.is_some_and(|at| at.elapsed() >= SAVE_DELAY) {
@@ -560,13 +588,22 @@ impl App {
         self.clear_finished_flashes();
         let minutes = u64::from(self.ws.settings.security.auto_lock_minutes);
         let mut locked_now = false;
+        let mut open_now = false;
         if let Ok(mut vault) = self.engine.vault.lock() {
             let _ = vault.reload();
             locked_now = vault.lock_if_idle(Duration::from_secs(minutes * 60));
+            open_now = vault.state() == pyroporch_core::vault::VaultState::Unlocked;
         }
         if locked_now {
             self.log(true, "the vault locked itself after being idle");
         }
+        // Anything typed and not sent must not be sitting there, one click from unlocking it again.
+        if self.vault_was_open && !open_now {
+            self.vault_form.passphrase.wipe();
+            self.vault_form.confirm.wipe();
+            self.vault_form.new_passphrase.wipe();
+        }
+        self.vault_was_open = open_now;
         if self.view == View::Plugins && self.last_plugin_scan.elapsed() >= Duration::from_secs(5) {
             self.last_plugin_scan = Instant::now();
             self.engine.refresh_plugins_if_changed();
@@ -749,8 +786,9 @@ impl App {
 
     fn shut_down(&mut self) {
         let dirty: Vec<String> = self.dirty_profiles.keys().cloned().collect();
+        // Only ever an autosave: it comes back as unsaved work at the next start.
         for id in dirty {
-            let _ = self.ws.save_profile(&id);
+            let _ = self.ws.autosave_profile(&id);
         }
         if self.dirty_settings.is_some() {
             let _ = self.ws.save_settings();
@@ -826,6 +864,9 @@ impl App {
                         let text = if selected { RichText::new(label).color(Color32::WHITE) } else { RichText::new(label) };
                         let fill = if selected { p.accent } else { Color32::TRANSPARENT };
                         if ui.add(egui::Button::new(text).fill(fill).stroke(egui::Stroke::NONE)).clicked() {
+                            if self.view == View::Vault && view != View::Vault {
+                                self.vault_form.passphrase.wipe();
+                            }
                             self.view = view;
                             if view == View::Plugins {
                                 self.engine.refresh_plugins();
@@ -834,6 +875,16 @@ impl App {
                     }
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         self.vault_chip(ui, p);
+                        let changes = self.active_has_changes();
+                        let label = if changes { "Save" } else { "Saved" };
+                        let text = if changes { RichText::new(label).color(Color32::WHITE) } else { RichText::new(label) };
+                        let fill = if changes { p.accent } else { Color32::TRANSPARENT };
+                        let button = ui
+                            .add_enabled(changes, egui::Button::new(text).fill(fill))
+                            .on_hover_text("Puts this profile's changes in its file. Until then they're kept in an autosave file, and assistants don't see them.");
+                        if button.clicked() {
+                            self.save_active_profile();
+                        }
                         if self.asleep && ui.button("Wake the deck").clicked() {
                             self.asleep = false;
                         }
@@ -994,6 +1045,9 @@ impl App {
 
 impl eframe::App for App {
     fn logic(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        if ctx.input_mut(|i| i.consume_key(egui::Modifiers::COMMAND, egui::Key::S)) && self.active_has_changes() {
+            self.save_active_profile();
+        }
         self.background(ctx);
     }
 
