@@ -177,6 +177,8 @@ pub struct App {
     pub confirm_delete_page: Option<usize>,
     undo: UndoHistory,
     pub updates: updates::Updates,
+    /// How titles fit on keys, kept as measuring text for every key on every frame adds up.
+    pub fitted_labels: RefCell<HashMap<(String, u32, u32), pyroporch_core::label::FittedLabel>>,
     /// Asks the system for a file or folder. Only tests use anything else.
     pub pick_path: fn(deck::Pick) -> Option<PathBuf>,
     pub show_requests: bool,
@@ -293,6 +295,7 @@ impl App {
             confirm_delete_page: None,
             undo: UndoHistory::default(),
             updates: updates::Updates::new(),
+            fitted_labels: RefCell::new(HashMap::new()),
             pick_path: deck::ask_system_for_path,
             show_requests: false,
             pending,
@@ -835,6 +838,7 @@ impl App {
             row: BACK_SLOT.0,
             col: BACK_SLOT.1,
             title: "Back".into(),
+            title_position: Default::default(),
             icon: "⬅".into(),
             background: String::new(),
             color: "#3A4252".into(),
@@ -850,6 +854,7 @@ impl App {
                     row: key.row,
                     col: key.col,
                     title,
+                    title_position: pyroporch_core::label::TitlePosition::from_setting(&key.title_position),
                     icon,
                     background: self.background_path(&key.background),
                     color,

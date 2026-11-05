@@ -115,7 +115,8 @@ A grid is 1 to 8 rows by 1 to 16 columns, and each key's `row` and `col` count f
 | Setting | What it does |
 |---|---|
 | `row`, `col` | Where it sits. A key outside the grid is kept, and comes back if the grid grows |
-| `title` | The text on it |
+| `title` | The text on it. It's sized to fit: one letter is big, and a long word is small |
+| `title_position` | Where the title sits: `top`, `middle` or `bottom`. `bottom` if left out |
 | `icon` | One character or emoji, or `builtin:lantern-out` for the lantern that's gone out |
 | `background` | A picture filling the key: see [Folders and pictures](#folders-and-pictures) |
 | `color`, `text_color` | Its background and title colours, like `#2F6FDB` |

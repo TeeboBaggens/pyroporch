@@ -6,6 +6,7 @@ use super::{App, KeyId, KeyLook, SecretDialog, SecretTarget, hotkey};
 use eframe::egui::{self, Align2, Color32, CornerRadius, FontId, RichText, Sense, Stroke, StrokeKind, Ui, Vec2};
 use pyroporch_core::config::{BACK_SLOT, Key, MAX_FOLDER_DEPTH, Page, Preset, Profile, Step};
 use pyroporch_core::engine::{Block, SLEEP_ICON};
+use pyroporch_core::label::{FittedLabel, KeyLayout, LINE_HEIGHT, TitlePosition, fit_label};
 use pyroporch_core::policy::Grants;
 use pyroporch_core::security::{find_refs, plaintext_findings, reference_name};
 use pyroporch_core::transfer::store_image;
@@ -15,6 +16,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 const KEY_GAP: f32 = 12.0;
+const MAX_FITTED_LABELS: usize = 1000;
 /// How big a drawn icon is in the icon picker.
 const ICON_BUTTON_SIZE: f32 = 22.0;
 /// The most favourite colours kept. Adding another lets go of the oldest.
@@ -772,6 +774,23 @@ impl App {
         self.draft = None;
     }
 
+    /// The biggest a title can be on a key this size, remembered until a lot have been asked about.
+    fn fitted_label(&self, painter: &egui::Painter, title: &str, size: Vec2, layout: KeyLayout) -> FittedLabel {
+        let room = size.y * (layout.label_bottom - layout.label_top);
+        let wanted = (title.to_string(), size.x as u32, room as u32);
+        let mut fitted = self.fitted_labels.borrow_mut();
+        if fitted.len() > MAX_FITTED_LABELS {
+            fitted.clear();
+        }
+        fitted
+            .entry(wanted)
+            .or_insert_with(|| {
+                let measure = |text: &str, size: f32| painter.layout_no_wrap(text.to_string(), FontId::proportional(size), Color32::WHITE).size().x;
+                fit_label(title, size.x * 0.88, room, (size.y * 0.09, size.y), &measure)
+            })
+            .clone()
+    }
+
     /// The picture for a drawn icon, or nothing if this icon is a character.
     fn drawn_icon(&self, ctx: &egui::Context, icon: &str) -> Option<egui::TextureId> {
         icon.starts_with(DRAWN_ICON_PREFIX).then(|| self.texture_for(ctx, icon).map(|texture| texture.id())).flatten()
@@ -861,38 +880,47 @@ impl App {
             egui::Image::from_texture((texture.id(), rect.size())).corner_radius(radius).tint(tint).paint_at(ui, rect);
             on_picture = true;
         }
+        let position = TitlePosition::from_setting(&key.title_position);
+        let layout = position.layout(!on_picture && !icon.is_empty());
         let icon_size = rect.width() * if has_title { 0.34 } else { 0.46 };
-        let icon_y = rect.top() + rect.height() * if has_title { 0.38 } else { 0.5 };
+        let icon_y = rect.top() + rect.height() * if has_title { layout.icon_center } else { 0.5 };
+        // A title on top of the icon needs it to stand back.
+        let icon_tint = if has_title && layout.dim_icon { Color32::WHITE.gamma_multiply(0.35) } else { Color32::WHITE };
         if on_picture {
             // The picture is the key's look, so the small icon stays out of its way.
         } else if icon.starts_with(DRAWN_ICON_PREFIX) {
             if let Some(texture) = self.drawn_icon(ui.ctx(), &icon) {
                 let image_rect = egui::Rect::from_center_size(egui::pos2(rect.center().x, icon_y), Vec2::splat(icon_size * 1.5));
-                painter.image(texture, image_rect, egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)), Color32::WHITE);
+                painter.image(texture, image_rect, egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)), icon_tint);
             }
         } else if icon.contains(['/', '\\']) || icon.ends_with(".png") || icon.ends_with(".jpg") {
             if let Some(texture) = self.texture_for(ui.ctx(), &icon) {
                 let image_rect = egui::Rect::from_center_size(egui::pos2(rect.center().x, icon_y), Vec2::splat(icon_size * 1.3));
-                painter.image(texture.id(), image_rect, egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)), Color32::WHITE);
+                painter.image(texture.id(), image_rect, egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)), icon_tint);
             }
         } else if !icon.is_empty() {
-            painter.text(egui::pos2(rect.center().x, icon_y), Align2::CENTER_CENTER, &icon, FontId::proportional(icon_size), parse_color(&icon_color).unwrap_or(text));
+            painter.text(egui::pos2(rect.center().x, icon_y), Align2::CENTER_CENTER, &icon, FontId::proportional(icon_size), parse_color(&icon_color).unwrap_or(text).gamma_multiply(if has_title && layout.dim_icon { 0.35 } else { 1.0 }));
         }
         if has_title {
-            let font = FontId::proportional((rect.width() * 0.125).clamp(9.0, 13.0));
             if on_picture && key.text_color.is_empty() {
                 text = Color32::WHITE;
             }
-            let galley = painter.layout(title, font, text, rect.width() - 10.0);
-            let pos = egui::pos2(rect.center().x - galley.size().x / 2.0, rect.bottom() - galley.size().y - rect.height() * 0.08);
+            let fitted = self.fitted_label(&painter, &title, rect.size(), layout);
+            let line_height = fitted.size * LINE_HEIGHT;
+            let total = line_height * fitted.lines.len() as f32;
+            let first = rect.top() + position.first_line_at(layout, rect.height(), total);
             if on_picture {
                 // A dark band keeps the title readable on any picture.
-                let band = egui::Rect::from_min_max(egui::pos2(rect.left(), pos.y - 4.0), rect.right_bottom());
-                let corners = radius.se;
-                let shape = CornerRadius { nw: 0, ne: 0, sw: corners, se: corners };
+                let band = egui::Rect::from_x_y_ranges(rect.x_range(), (first - 4.0).max(rect.top())..=(first + total + 4.0).min(rect.bottom()));
+                let (top, bottom) = (band.top() <= rect.top(), band.bottom() >= rect.bottom());
+                let corner = |round: bool| if round { radius.se } else { 0 };
+                let shape = CornerRadius { nw: corner(top), ne: corner(top), sw: corner(bottom), se: corner(bottom) };
                 painter.rect_filled(band, shape, Color32::from_black_alpha(130));
             }
-            painter.galley(pos, galley, text);
+            for (index, line) in fitted.lines.iter().enumerate() {
+                let center = egui::pos2(rect.center().x, first + line_height * (index as f32 + 0.5));
+                painter.text(center, Align2::CENTER_CENTER, line, FontId::proportional(fitted.size), text);
+            }
         }
         if key.folder.is_some() && key.icon != FOLDER_ICON {
             painter.text(rect.left_top() + Vec2::new(11.0, 11.0), Align2::CENTER_CENTER, FOLDER_ICON, FontId::proportional(12.0), text);
@@ -1556,6 +1584,17 @@ fn key_look_form(ui: &mut Ui, key: &mut Key, favorites: &mut Vec<String>, lanter
     egui::Grid::new("look").num_columns(2).spacing([10.0, 6.0]).show(ui, |ui| {
         let label = ui.label("Title");
         ui.add(egui::TextEdit::singleline(&mut key.title).desired_width(ui.available_width() - 4.0)).labelled_by(label.id);
+        ui.end_row();
+
+        ui.label("Title sits at");
+        ui.horizontal(|ui| {
+            let current = TitlePosition::from_setting(&key.title_position);
+            for (position, name) in [(TitlePosition::Top, "Top"), (TitlePosition::Middle, "Middle"), (TitlePosition::Bottom, "Bottom")] {
+                if ui.selectable_label(current == position, name).clicked() {
+                    key.title_position = position.setting().to_string();
+                }
+            }
+        });
         ui.end_row();
 
         let label = ui.label("Icon");

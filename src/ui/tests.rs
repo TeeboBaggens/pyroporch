@@ -1730,3 +1730,23 @@ fn a_box_keeps_the_keyboard_while_typing_even_as_warnings_come_and_go() {
     assert!(status_key(&mut harness).1.title.ends_with("xy"));
 }
 
+#[test]
+fn a_title_can_be_placed_from_the_form_and_the_deck_is_told() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut harness = harness(&dir);
+    settle(&mut harness);
+    click(&mut harness, "API Status");
+    let on_deck = |harness: &Harness<'_, App>| harness.state().current_visuals().into_iter().find(|v| (v.row, v.col) == (0, 1)).unwrap().title_position;
+    assert_eq!(on_deck(&harness), pyroporch_core::label::TitlePosition::Bottom, "where titles have always been");
+    for (name, setting, position) in [
+        ("Top", "top", pyroporch_core::label::TitlePosition::Top),
+        ("Middle", "middle", pyroporch_core::label::TitlePosition::Middle),
+        ("Bottom", "bottom", pyroporch_core::label::TitlePosition::Bottom),
+    ] {
+        harness.get_by_label(name).click_accesskit();
+        settle(&mut harness);
+        assert_eq!(status_key(&mut harness).1.title_position, setting);
+        assert_eq!(on_deck(&harness), position);
+    }
+}
+

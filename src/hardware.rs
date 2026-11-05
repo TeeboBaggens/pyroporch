@@ -11,6 +11,7 @@ pub struct KeyVisual {
     pub row: u32,
     pub col: u32,
     pub title: String,
+    pub title_position: pyroporch_core::label::TitlePosition,
     pub icon: String,
     /// Full path of the picture filling the key, if any.
     pub background: String,
@@ -79,6 +80,7 @@ pub fn describe_connected() -> Vec<String> {
 #[cfg(feature = "hardware")]
 mod usb {
     use super::{Command, Event, KeyVisual, SaverFrame};
+    use pyroporch_core::label::{LINE_HEIGHT, fit_label};
     use ab_glyph::{Font, FontRef, PxScale, ScaleFont, point};
     use elgato_streamdeck::{StreamDeck, StreamDeckInput, list_devices, new_hidapi, refresh_device_list};
     use image::{DynamicImage, Rgba, RgbaImage, imageops};
@@ -331,6 +333,20 @@ mod usb {
         }
     }
 
+    /// How wide text is at a size, with the same choice of font as drawing it.
+    fn text_width(fonts: &[FontRef<'_>], text: &str, size: f32) -> f32 {
+        let scale = PxScale::from(size);
+        let font_for = |c: char| fonts.iter().find(|font| font.glyph_id(c).0 != 0).or(fonts.first());
+        text.chars().map(|c| font_for(c).map_or(0.0, |font| font.as_scaled(scale).h_advance(font.glyph_id(c)))).sum()
+    }
+
+    /// Makes a picture mostly see-through, for a title to sit on top of.
+    fn stand_back(picture: &mut RgbaImage) {
+        for pixel in picture.pixels_mut() {
+            pixel.0[3] /= 3;
+        }
+    }
+
     /// Draws text centred, using the first font in the list that has each character.
     fn put_text(image: &mut RgbaImage, fonts: &[FontRef<'_>], text: &str, size: f32, center_y: f32, color: Rgba<u8>) {
         let scale = PxScale::from(size);
@@ -364,7 +380,7 @@ mod usb {
         }
     }
 
-    /// Draws one key: background colour, icon, and the title near the bottom.
+    /// Draws one key: background colour, icon, and the title.
     pub fn render_key(visual: &KeyVisual, (width, height): (u32, u32)) -> RgbaImage {
         let mut image = RgbaImage::from_pixel(width, height, parse(&visual.color, [0x26, 0x2B, 0x35]));
         let text_color = parse(&visual.text_color, [255, 255, 255]);
@@ -391,36 +407,59 @@ mod usb {
             }
             None => false,
         };
+        let has_icon = !on_picture && !visual.icon.is_empty();
+        let position = visual.title_position;
+        let layout = position.layout(has_icon);
+        let icon_center = height as f32 * if has_title { layout.icon_center } else { 0.5 };
+        let dim = has_title && layout.dim_icon;
         let looks_like_path = visual.icon.contains(['/', '\\', '.']);
         if on_picture {
             // The picture is the key's look, so the small icon stays out of its way.
-        } else if let Some(drawn) = crate::icon::named(&visual.icon, (height as f32 * if has_title { 0.56 } else { 0.72 }) as u32) {
+        } else if let Some(mut drawn) = crate::icon::named(&visual.icon, (height as f32 * if has_title { 0.56 } else { 0.72 }) as u32) {
+            if dim {
+                stand_back(&mut drawn);
+            }
             let x = i64::from(width.saturating_sub(drawn.width()) / 2);
-            let y = if has_title { i64::from(height / 14) } else { i64::from(height.saturating_sub(drawn.height()) / 2) };
-            imageops::overlay(&mut image, &drawn, x, y);
+            imageops::overlay(&mut image, &drawn, x, (icon_center - drawn.height() as f32 / 2.0) as i64);
         } else if looks_like_path {
             if let Some(icon) = crate::icon::open_capped(&visual.icon) {
-                let side = (height as f32 * 0.6) as u32;
-                let icon = imageops::resize(&icon, side, side, imageops::FilterType::Triangle);
+                let side = height * if has_title { 5 } else { 7 } / 10;
+                let mut icon = imageops::resize(&icon, side, side, imageops::FilterType::Triangle);
+                if dim {
+                    stand_back(&mut icon);
+                }
                 let x = i64::from(width.saturating_sub(icon.width()) / 2);
-                imageops::overlay(&mut image, &icon, x, i64::from(height / 12));
+                imageops::overlay(&mut image, &icon, x, (icon_center - icon.height() as f32 / 2.0) as i64);
             }
         } else if !visual.icon.is_empty() {
-            let center = if has_title { 0.4 } else { 0.5 };
-            let icon_color = parse(&visual.icon_color, [text_color.0[0], text_color.0[1], text_color.0[2]]);
-            put_text(&mut image, &symbols, &visual.icon, height as f32 * 0.42, height as f32 * center, icon_color);
-        }
-        if has_title {
-            let title: String = visual.title.chars().take(12).collect();
-            let (size, center) = (height as f32 * 0.17, height as f32 * 0.83);
-            // A dark edge keeps the title readable on any picture.
-            if on_picture {
-                let shadow = Rgba([0, 0, 0, 255]);
-                for offset in [-1.0, 1.0] {
-                    put_text(&mut image, &label, &title, size, center + offset, shadow);
+            let mut icon_color = parse(&visual.icon_color, [text_color.0[0], text_color.0[1], text_color.0[2]]);
+            if dim {
+                // Part way to the key's own colour, as drawing text has no see-through.
+                let under = parse(&visual.color, [0x26, 0x2B, 0x35]);
+                for channel in 0..3 {
+                    icon_color.0[channel] = under.0[channel] / 3 * 2 + icon_color.0[channel] / 3;
                 }
             }
-            put_text(&mut image, &label, &title, size, center, text_color);
+            put_text(&mut image, &symbols, &visual.icon, height as f32 * 0.42, icon_center, icon_color);
+        }
+        if has_title {
+            let (key_width, key_height) = (width as f32, height as f32);
+            let room = key_height * (layout.label_bottom - layout.label_top);
+            let measure = |text: &str, size: f32| text_width(&label, text, size);
+            let fitted = fit_label(&visual.title, key_width * 0.88, room, (key_height * 0.09, key_height), &measure);
+            let line_height = fitted.size * LINE_HEIGHT;
+            let first = position.first_line_at(layout, key_height, line_height * fitted.lines.len() as f32);
+            for (index, line) in fitted.lines.iter().enumerate() {
+                let center = first + line_height * (index as f32 + 0.5);
+                // A dark edge keeps the title readable on any picture.
+                if on_picture {
+                    let shadow = Rgba([0, 0, 0, 255]);
+                    for offset in [-1.0, 1.0] {
+                        put_text(&mut image, &label, line, fitted.size, center + offset, shadow);
+                    }
+                }
+                put_text(&mut image, &label, line, fitted.size, center, text_color);
+            }
         }
         image
     }
@@ -428,6 +467,7 @@ mod usb {
     #[cfg(test)]
     mod tests {
         use super::*;
+        use pyroporch_core::label::TitlePosition;
 
         #[test]
         fn draws_a_key_with_its_colour_and_text() {
@@ -435,6 +475,7 @@ mod usb {
                 row: 0,
                 col: 0,
                 title: "Hello".into(),
+                title_position: Default::default(),
                 icon: "🔗".into(),
                 background: String::new(),
                 color: "#102030".into(),
@@ -457,6 +498,7 @@ mod usb {
                 row: 0,
                 col: 0,
                 title: String::new(),
+                title_position: Default::default(),
                 icon: "🔗".into(),
                 background: path.to_string_lossy().into_owned(),
                 color: "#102030".into(),
@@ -531,6 +573,7 @@ mod usb {
                 row: 0,
                 col: 0,
                 title: "Sleep".into(),
+                title_position: Default::default(),
                 icon: pyroporch_core::engine::SLEEP_ICON.into(),
                 background: String::new(),
                 color: "#101010".into(),
@@ -542,12 +585,55 @@ mod usb {
             assert!(embers > 3, "{embers} ember pixels");
         }
 
+        /// How far across and down the white pixels go on a black key with this title.
+        fn ink(title: &str, position: TitlePosition) -> (u32, u32, u32) {
+            let visual = KeyVisual {
+                row: 0,
+                col: 0,
+                title: title.into(),
+                title_position: position,
+                icon: String::new(),
+                background: String::new(),
+                color: "#000000".into(),
+                icon_color: String::new(),
+                text_color: "#FFFFFF".into(),
+            };
+            let image = render_key(&visual, (96, 96));
+            let inked: Vec<(u32, u32)> = image.enumerate_pixels().filter(|(_, _, p)| p.0[0] > 128).map(|(x, y, _)| (x, y)).collect();
+            assert!(!inked.is_empty(), "{title}");
+            let across = inked.iter().map(|p| p.0).max().unwrap() - inked.iter().map(|p| p.0).min().unwrap();
+            let (top, bottom) = (inked.iter().map(|p| p.1).min().unwrap(), inked.iter().map(|p| p.1).max().unwrap());
+            (across, top, bottom)
+        }
+
+        #[test]
+        fn a_short_title_is_big_a_long_one_shrinks_to_fit_and_none_is_cut_short() {
+            let (_, top, bottom) = ink("A", TitlePosition::Middle);
+            let tall = bottom - top;
+            assert!(tall > 40, "one letter fills the key: {tall} of 96");
+            let (across, top, bottom) = ink("ireallylovepokemon", TitlePosition::Middle);
+            assert!(bottom - top < tall / 2, "a long word is much smaller");
+            assert!((60..=90).contains(&across), "and fits across the key, all of it: {across}");
+        }
+
+        #[test]
+        fn a_title_sits_at_the_top_middle_or_bottom_of_the_key() {
+            // A big letter sits a little inside the line it's on, so these are about a quarter in.
+            let (_, top, _) = ink("Hi", TitlePosition::Top);
+            assert!(top < 25, "top: {top}");
+            let (_, _, bottom) = ink("Hi", TitlePosition::Bottom);
+            assert!(bottom > 71, "bottom: {bottom}");
+            let (_, top, bottom) = ink("ireallylovepokemon", TitlePosition::Middle);
+            assert!(top > 35 && bottom < 61, "middle: {top} to {bottom}");
+        }
+
         #[test]
         fn an_icon_can_have_a_colour_of_its_own_apart_from_the_title() {
             let visual = KeyVisual {
                 row: 0,
                 col: 0,
                 title: "Hello".into(),
+                title_position: Default::default(),
                 icon: "⚠".into(),
                 background: String::new(),
                 color: "#000000".into(),

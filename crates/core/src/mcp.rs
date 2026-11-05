@@ -9,6 +9,7 @@ use std::io::{BufRead, Read, Write};
 use std::sync::Arc;
 use std::time::Duration;
 
+use crate::label::TitlePosition;
 use crate::config::{BACK_SLOT, Key, MAX_FOLDER_DEPTH, Page, Preset, Profile, Step, Workspace};
 use crate::engine::{Block, Engine};
 use crate::paths::audit;
@@ -175,6 +176,7 @@ fn tool_list(read_only_mode: bool) -> Vec<Value> {
     let mut key_props = location.clone();
     if let Some(map) = key_props.as_object_mut() {
         map.insert("title".into(), json!({"type": "string"}));
+        map.insert("title_position".into(), json!({"type": "string", "enum": ["top", "middle", "bottom"], "description": "Which part of the key the title sits against. Bottom if left out."}));
         map.insert("icon".into(), json!({"type": "string", "description": "One character, such as an emoji. builtin:lantern-out is the drawn sleep icon."}));
         map.insert("color".into(), json!({"type": "string", "description": "Background, like #2F6FDB."}));
         map.insert("icon_color".into(), json!({"type": "string", "description": "Icon colour, like #FFFFFF, for an icon that's a character."}));
@@ -290,6 +292,14 @@ fn required_u32(args: &Map<String, Value>, name: &str) -> Result<u32, String> {
 }
 
 /// A colour setting: empty, or the form the app can read.
+fn title_position_arg(args: &Map<String, Value>) -> Result<String, String> {
+    let text = str_arg(args, "title_position").unwrap_or("");
+    if !text.is_empty() && !TitlePosition::ALL.iter().any(|position| position.setting() == text) {
+        return Err("title_position should be top, middle or bottom".into());
+    }
+    Ok(text.to_string())
+}
+
 fn color_arg(args: &Map<String, Value>, name: &str) -> Result<String, String> {
     let text = str_arg(args, name).unwrap_or("");
     let valid = text.strip_prefix('#').is_some_and(|hex| hex.len() == 6 && hex.chars().all(|c| c.is_ascii_hexdigit()));
@@ -729,6 +739,7 @@ impl McpServer {
             row,
             col,
             title: text("title"),
+            title_position: title_position_arg(args)?,
             icon: text("icon"),
             background,
             color: color_arg(args, "color")?,
@@ -1645,6 +1656,17 @@ mod tests {
         assert!(failed && text.contains("deep"), "{text}");
         let again = Workspace::load(Paths::at(dir.path())).unwrap();
         assert!(again.errors.is_empty(), "{:?}", again.errors);
+    }
+
+    #[test]
+    fn a_title_goes_where_its_asked_to_and_nowhere_else() {
+        let (_dir, mut server) = server();
+        let (failed, text) = call(&mut server, "set_key", json!({"row": 2, "col": 0, "title_position": "sideways", "steps": []}));
+        assert!(failed && text.contains("title_position"), "{text}");
+        let (failed, text) = call(&mut server, "set_key", json!({"row": 2, "col": 0, "title_position": "top", "steps": []}));
+        assert!(!failed, "{text}");
+        let saved = server.ws.profiles["default"].pages[0].key_at(2, 0).unwrap();
+        assert_eq!(saved.title_position, "top");
     }
 
     #[test]
