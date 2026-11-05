@@ -212,7 +212,6 @@ impl App {
             }
             if let Some(mut name) = self.new_profile_name.take() {
                 let response = ui.add(egui::TextEdit::singleline(&mut name).desired_width(120.0).hint_text("Name"));
-                response.request_focus();
                 let enter = response.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
                 if enter && !name.trim().is_empty() {
                     let profile = Profile {
@@ -224,6 +223,11 @@ impl App {
                         Err(error) => self.log(false, error),
                     }
                 } else if !ui.input(|i| i.key_pressed(egui::Key::Escape)) && !response.lost_focus() {
+                    // Only until it has focus: asking again would hide that focus was given up,
+                    // which is how pressing return shows.
+                    if !response.has_focus() {
+                        response.request_focus();
+                    }
                     self.new_profile_name = Some(name);
                 }
             }
@@ -315,7 +319,6 @@ impl App {
             }
             if let Some(mut name) = self.new_page_name.take() {
                 let response = ui.add(egui::TextEdit::singleline(&mut name).desired_width(110.0).hint_text("Page name"));
-                response.request_focus();
                 let enter = response.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
                 if enter && !name.trim().is_empty() {
                     if let Some(profile) = self.profile_mut() {
@@ -327,6 +330,11 @@ impl App {
                     }
                     self.mark_profile_dirty();
                 } else if !ui.input(|i| i.key_pressed(egui::Key::Escape)) && !response.lost_focus() {
+                    // Only until it has focus: asking again would hide that focus was given up,
+                    // which is how pressing return shows.
+                    if !response.has_focus() {
+                        response.request_focus();
+                    }
                     self.new_page_name = Some(name);
                 }
             }
