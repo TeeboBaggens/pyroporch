@@ -243,8 +243,9 @@ fn the_quick_start_in_the_plugin_guide_works_from_start_to_finish() {
     assert!(report.message.starts_with("rolled"), "{}", report.message);
 }
 
-/// A file built on Windows writes its paths differently, so this can only compare on the others.
-#[cfg(unix)]
+/// These are built on an Apple Silicon Mac. Other kinds of computer build a different file from the
+/// same source, so this can only compare there.
+#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
 #[test]
 fn the_sample_plugins_the_app_carries_are_up_to_date() {
     let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");

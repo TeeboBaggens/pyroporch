@@ -91,6 +91,24 @@ jobs:
             Windows) "$PACKAGE/pyroporch.exe" --version ;;
             *) "$PACKAGE/pyroporch" --version ;;
           esac
+      - name: Check the packaged program can run a plugin
+        env:
+          PYROPORCH_HOME: ${{ runner.temp }}/smoke
+        run: |
+          case "$RUNNER_OS" in
+            macOS) program="$PACKAGE/Pyro Porch.app/Contents/MacOS/pyroporch" ;;
+            Windows) program="$PACKAGE/pyroporch.exe" ;;
+            *) program="$PACKAGE/pyroporch" ;;
+          esac
+          mkdir "$PYROPORCH_HOME"
+          # Pressing a key runs the API call sample, which calls back into the app.
+          printf '%s\n' \
+            '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-11-25","capabilities":{},"clientInfo":{"name":"release","version":"1"}}}' \
+            '{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"set_key","arguments":{"row":2,"col":0,"title":"Check","steps":[{"action":"pyroporch.api-call/request","settings":{"url":"https://api.example.com/x"}}]}}}' \
+            '{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"press_key","arguments":{"row":2,"col":0}}}' \
+            | "$program" mcp > smoke.txt
+          grep -q '"id":3,' smoke.txt
+          rm smoke.txt
       - name: Pack the files
         run: |
           mkdir dist
