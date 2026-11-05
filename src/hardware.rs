@@ -512,6 +512,16 @@ mod usb {
         }
 
         #[test]
+        fn every_status_icon_on_offer_has_a_shape_to_draw() {
+            let fonts = [epaint_default_fonts::NOTO_EMOJI_REGULAR, epaint_default_fonts::EMOJI_ICON].map(|bytes| FontRef::try_from_slice(bytes).unwrap());
+            for icon in crate::ui::STATUS_ICON_CHOICES {
+                for letter in icon.chars().filter(|letter| *letter != '\u{FE0F}') {
+                    assert!(fonts.iter().any(|font| font.glyph_id(letter).0 != 0), "{icon} can't be drawn");
+                }
+            }
+        }
+
+        #[test]
         fn the_drawn_sleep_icon_shows_on_a_key() {
             let visual = KeyVisual {
                 row: 0,

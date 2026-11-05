@@ -2,6 +2,8 @@
 
 mod crop;
 mod deck;
+#[cfg(test)]
+pub use deck::STATUS_ICON_CHOICES;
 mod hotkey;
 mod saver;
 mod screens;
@@ -95,6 +97,21 @@ pub struct VaultForm {
     pub is_error: bool,
 }
 
+/// What a key's last run asked it to show, in place of its own look.
+#[derive(Default)]
+pub struct LiveLook {
+    pub title: Option<String>,
+    pub icon: Option<String>,
+    pub color: Option<String>,
+}
+
+/// What a key shows right now.
+pub struct KeyLook {
+    pub title: String,
+    pub icon: String,
+    pub color: String,
+}
+
 /// How the app was started.
 #[derive(Default)]
 pub struct Launch {
@@ -129,7 +146,7 @@ pub struct App {
     pub use_mode: bool,
     pub search: String,
     pub activity: VecDeque<ActivityLine>,
-    pub live_titles: HashMap<KeyId, String>,
+    pub live_looks: HashMap<KeyId, LiveLook>,
     pub flipped: HashSet<KeyId>,
     pub flashes: HashMap<KeyId, (Instant, bool)>,
     pub running: HashSet<KeyId>,
@@ -240,7 +257,7 @@ impl App {
             use_mode: false,
             search: String::new(),
             activity: VecDeque::new(),
-            live_titles: HashMap::new(),
+            live_looks: HashMap::new(),
             flipped: HashSet::new(),
             flashes: HashMap::new(),
             running: HashSet::new(),
@@ -378,8 +395,8 @@ impl App {
 
     pub fn mark_profile_dirty(&mut self) {
         self.dirty_profiles.insert(self.active_id(), Instant::now());
-        // A live title belongs to what the key was. The next run brings back a current one.
-        self.live_titles.clear();
+        // A live look belongs to what the key was. The next run brings back a current one.
+        self.live_looks.clear();
     }
 
     /// Reads the requests and allowances again, but only if their files have changed.
@@ -450,8 +467,16 @@ impl App {
         while let Ok((id, report, trigger)) = self.done_rx.try_recv() {
             self.running.remove(&id);
             self.flashes.insert(id.clone(), (Instant::now(), report.ok));
-            if let Some(title) = report.title.clone() {
-                self.live_titles.insert(id.clone(), title);
+            if report.ok {
+                let look = self.live_looks.entry(id.clone()).or_default();
+                if report.title.is_some() {
+                    look.title.clone_from(&report.title);
+                }
+                look.icon.clone_from(&report.icon);
+                look.color.clone_from(&report.color);
+            } else {
+                // What it last found may no longer be true, and a key mustn't go on saying all is well.
+                self.live_looks.remove(&id);
             }
             if report.ok && trigger == Trigger::Press {
                 let toggles = self
@@ -737,12 +762,12 @@ impl App {
             .iter()
             .filter(|key| !self.in_folder() || (key.row, key.col) != BACK_SLOT)
             .map(|key| {
-                let (title, color) = self.key_look(key);
+                let KeyLook { title, icon, color } = self.key_look(key);
                 hardware::KeyVisual {
                     row: key.row,
                     col: key.col,
                     title,
-                    icon: key.icon.clone(),
+                    icon,
                     background: self.background_path(&key.background),
                     color,
                     text_color: key.text_color.clone(),
@@ -821,20 +846,26 @@ impl App {
     }
 
     /// What a key shows right now, taking toggles and live values into account.
-    pub fn key_look(&self, key: &Key) -> (String, String) {
+    pub fn key_look(&self, key: &Key) -> KeyLook {
         let id = self.key_id(key.row, key.col);
         if self.saver.armed.as_ref().is_some_and(|armed| armed.id == id) {
-            return (format!("{}: On", key.title), key.color.clone());
+            return KeyLook { title: format!("{}: On", key.title), icon: key.icon.clone(), color: key.color.clone() };
         }
-        if let Some(live) = self.live_titles.get(&id) {
-            return (live.clone(), key.color.clone());
-        }
-        if self.flipped.contains(&id) {
+        let live = self.live_looks.get(&id);
+        let (title, color) = if let Some(title) = live.and_then(|live| live.title.as_ref()) {
+            (title, &key.color)
+        } else if self.flipped.contains(&id) {
             let title = if key.alt_title.is_empty() { &key.title } else { &key.alt_title };
             let color = if key.alt_color.is_empty() { &key.color } else { &key.alt_color };
-            return (title.clone(), color.clone());
+            (title, color)
+        } else {
+            (&key.title, &key.color)
+        };
+        KeyLook {
+            title: title.clone(),
+            icon: live.and_then(|live| live.icon.as_ref()).unwrap_or(&key.icon).clone(),
+            color: live.and_then(|live| live.color.as_ref()).unwrap_or(color).clone(),
         }
-        (key.title.clone(), key.color.clone())
     }
 
     fn top_bar(&mut self, ui: &mut egui::Ui) {

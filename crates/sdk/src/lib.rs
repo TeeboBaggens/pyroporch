@@ -94,6 +94,10 @@ pub struct Field {
     /// Only show this field when another field has this value: `(other_key, value)`.
     #[serde(default)]
     pub visible_when: Option<(String, String)>,
+    /// Don't show this field when another field has this value, or starts out with it:
+    /// `(other_key, value)`.
+    #[serde(default)]
+    pub hidden_when: Option<(String, String)>,
 }
 
 impl Field {
@@ -106,6 +110,7 @@ impl Field {
             default: Value::Null,
             required: false,
             visible_when: None,
+            hidden_when: None,
         }
     }
     pub fn help(mut self, help: &str) -> Self {
@@ -122,6 +127,10 @@ impl Field {
     }
     pub fn visible_when(mut self, key: &str, value: &str) -> Self {
         self.visible_when = Some((key.into(), value.into()));
+        self
+    }
+    pub fn hidden_when(mut self, key: &str, value: &str) -> Self {
+        self.hidden_when = Some((key.into(), value.into()));
         self
     }
 }
@@ -146,6 +155,71 @@ pub enum FieldKind {
     Hotkey,
     /// Name and value pairs, such as HTTP headers. Values may contain secret references.
     KeyValues,
+    /// Rows saying how the key should look for a value. Read it with [`RunRequest::rules`].
+    Rules,
+}
+
+/// How a [`Rule`] tests a value.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum RuleTest {
+    #[default]
+    #[serde(rename = "is")]
+    Is,
+    #[serde(rename = "is not")]
+    IsNot,
+    #[serde(rename = "contains")]
+    Contains,
+    #[serde(rename = "above")]
+    Above,
+    #[serde(rename = "below")]
+    Below,
+    /// Always matches, so it belongs last, to catch whatever the others didn't.
+    #[serde(rename = "anything else")]
+    AnythingElse,
+}
+
+impl RuleTest {
+    pub const ALL: [RuleTest; 6] = [RuleTest::Is, RuleTest::IsNot, RuleTest::Contains, RuleTest::Above, RuleTest::Below, RuleTest::AnythingElse];
+
+    /// What it's called in the settings form and the config file.
+    pub fn name(self) -> &'static str {
+        match self {
+            RuleTest::Is => "is",
+            RuleTest::IsNot => "is not",
+            RuleTest::Contains => "contains",
+            RuleTest::Above => "above",
+            RuleTest::Below => "below",
+            RuleTest::AnythingElse => "anything else",
+        }
+    }
+}
+
+/// One row of a [`FieldKind::Rules`] setting: when a value passes the test, the key takes this look.
+/// An empty `icon` or `color` leaves that part of the key as it is.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Rule {
+    pub when: RuleTest,
+    pub value: String,
+    pub icon: String,
+    pub color: String,
+}
+
+impl Rule {
+    /// Text is compared without regard to capitals. `above` and `below` compare numbers, so they
+    /// don't match anything that isn't one.
+    pub fn matches(&self, value: &str) -> bool {
+        let (found, wanted) = (value.trim().to_lowercase(), self.value.trim().to_lowercase());
+        let numbers = || Some((found.parse::<f64>().ok()?, wanted.parse::<f64>().ok()?));
+        match self.when {
+            RuleTest::Is => found == wanted,
+            RuleTest::IsNot => found != wanted,
+            RuleTest::Contains => found.contains(&wanted),
+            RuleTest::Above => numbers().is_some_and(|(found, wanted)| found > wanted),
+            RuleTest::Below => numbers().is_some_and(|(found, wanted)| found < wanted),
+            RuleTest::AnythingElse => true,
+        }
+    }
 }
 
 /// Why an action is being run.
@@ -189,6 +263,14 @@ impl RunRequest {
             })
             .unwrap_or_default()
     }
+    /// The rows of a rules setting, in order, or none when it is missing. Fails on one that can't
+    /// be read, as a key quietly ignoring its rules would look as if all was well.
+    pub fn rules(&self, key: &str) -> Result<Vec<Rule>, String> {
+        match self.settings.get(key) {
+            None | Some(Value::Null) => Ok(Vec::new()),
+            Some(rules) => serde_json::from_value(rules.clone()).map_err(|e| format!("can't read the rules in {key}: {e}")),
+        }
+    }
 }
 
 /// What came of running an action.
@@ -200,6 +282,13 @@ pub struct Outcome {
     /// New text to show on the key, for live values.
     #[serde(default)]
     pub title: Option<String>,
+    /// A character or emoji to show on the key instead of its own icon, until the next run. Not a
+    /// file: the app ignores anything that looks like a path.
+    #[serde(default)]
+    pub icon: Option<String>,
+    /// A colour like `#2E8B57` to show on the key instead of its own, until the next run.
+    #[serde(default)]
+    pub color: Option<String>,
     /// Move the deck somewhere else.
     #[serde(default)]
     pub navigate: Option<Navigate>,

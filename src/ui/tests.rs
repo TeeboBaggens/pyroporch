@@ -1114,3 +1114,108 @@ fn every_group_can_be_collapsed() {
         assert!(harness.query_by_role_and_label(Role::Label, inside).is_none(), "{heading}");
     }
 }
+
+/// The API Status key on the first page, ready to be given other settings.
+fn status_key<'a>(harness: &'a mut Harness<'_, App>) -> (KeyId, &'a mut Key) {
+    let id = harness.state().key_id(0, 1);
+    let app = harness.state_mut();
+    let key = app.ws.profiles.get_mut("default").unwrap().pages[0].key_at_mut(0, 1).unwrap();
+    (id, key)
+}
+
+fn finish(harness: &mut Harness<'_, App>, id: &KeyId, report: RunReport) {
+    harness.state().done_tx.send((id.clone(), report, Trigger::Refresh)).unwrap();
+    settle(harness);
+}
+
+#[test]
+fn a_keys_look_follows_what_its_rules_found_and_never_outlives_a_failed_check() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut harness = harness(&dir);
+    settle(&mut harness);
+    let (id, key) = status_key(&mut harness);
+    let (own_icon, own_color) = (key.icon.clone(), key.color.clone());
+    let look = |harness: &Harness<'_, App>| {
+        let app = harness.state();
+        let key = app.ws.profiles["default"].pages[0].key_at(0, 1).unwrap();
+        let KeyLook { title, icon, color } = app.key_look(key);
+        (title, icon, color)
+    };
+
+    let found = RunReport { ok: true, title: Some("Partial Outage".into()), icon: Some("🔥".into()), color: Some("#B4532A".into()), ..RunReport::default() };
+    finish(&mut harness, &id, found);
+    assert_eq!(look(&harness), ("Partial Outage".to_string(), "🔥".to_string(), "#B4532A".to_string()));
+    let visual = harness.state().current_visuals().into_iter().find(|v| (v.row, v.col) == (0, 1)).unwrap();
+    assert_eq!((visual.icon.as_str(), visual.color.as_str()), ("🔥", "#B4532A"), "the deck shows the same");
+
+    // The value moved on to something no rule fits: the key's own icon and colour come back.
+    finish(&mut harness, &id, RunReport { ok: true, title: Some("Maintenance".into()), ..RunReport::default() });
+    assert_eq!(look(&harness), ("Maintenance".to_string(), own_icon.clone(), own_color.clone()));
+
+    let found = RunReport { ok: true, icon: Some("✅".into()), color: Some("#2E8B57".into()), ..RunReport::default() };
+    finish(&mut harness, &id, found);
+    assert_eq!(look(&harness).2, "#2E8B57");
+
+    // The check failed, so nobody knows any more whether all is well.
+    finish(&mut harness, &id, RunReport { ok: false, message: "the server answered 500".into(), ..RunReport::default() });
+    assert_eq!(look(&harness), ("API Status".to_string(), own_icon, own_color));
+}
+
+#[test]
+fn the_api_form_only_asks_for_a_credential_when_signing_in() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut harness = harness(&dir);
+    settle(&mut harness);
+    click(&mut harness, "API Status");
+    harness.get_by_label("Sign in with");
+    assert!(harness.query_by_label("Key or password").is_none(), "this key's sign-in is none");
+
+    let (_, key) = status_key(&mut harness);
+    key.steps[0].settings.remove("auth");
+    settle(&mut harness);
+    assert!(harness.query_by_label("Key or password").is_none(), "none is what it starts as");
+
+    let (_, key) = status_key(&mut harness);
+    key.steps[0].settings.insert("auth".into(), serde_json::json!("bearer token"));
+    settle(&mut harness);
+    harness.get_by_label("Key or password");
+}
+
+#[test]
+fn rules_made_in_the_form_are_saved_with_the_key() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut harness = harness(&dir);
+    settle(&mut harness);
+    click(&mut harness, "API Status");
+    // It may be scrolled out of sight in a small window, and this reaches it anyway.
+    for _ in 0..2 {
+        harness.get_by_label("+ Add rule").click_accesskit();
+        settle(&mut harness);
+    }
+    let (_, key) = status_key(&mut harness);
+    assert_eq!(key.steps[0].settings["rules"].as_array().unwrap().len(), 2);
+
+    let rules = serde_json::json!([
+        {"when": "is", "value": "none", "icon": "✅", "color": "#2E8B57"},
+        {"when": "anything else", "value": "", "icon": "", "color": "#C0392B"},
+    ]);
+    key.steps[0].settings.insert("rules".into(), rules.clone());
+    harness.state_mut().ws.save_profile("default").unwrap();
+    let again = Workspace::load(Paths::at(dir.path())).unwrap();
+    let saved = again.profiles["default"].pages[0].key_at(0, 1).unwrap();
+    assert_eq!(saved.steps[0].settings["rules"], rules);
+
+    // Taking the last rule off takes the setting off, and one that can't be read is left alone.
+    let (_, key) = status_key(&mut harness);
+    key.steps[0].settings.insert("rules".into(), serde_json::json!([{"when": "is"}]));
+    settle(&mut harness);
+    harness.query_all_by_label("×").last().unwrap().click_accesskit();
+    settle(&mut harness);
+    let (_, key) = status_key(&mut harness);
+    assert!(!key.steps[0].settings.contains_key("rules"));
+    key.steps[0].settings.insert("rules".into(), serde_json::json!("green"));
+    settle(&mut harness);
+    harness.get_by_label_contains("have a mistake");
+    let (_, key) = status_key(&mut harness);
+    assert_eq!(key.steps[0].settings["rules"], "green");
+}

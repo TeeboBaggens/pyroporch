@@ -70,6 +70,9 @@ struct Loaded {
     deck_allowed: bool,
 }
 
+/// The longest icon a plugin may set. Some emoji take several characters.
+const MAX_LIVE_ICON_CHARS: usize = 32;
+
 /// The action's description, without copying it. The caller has to hold the lock.
 fn find_spec<'a>(loaded: &'a [Loaded], full_id: &str) -> Option<&'a ActionSpec> {
     let (plugin, action) = full_id.split_once('/')?;
@@ -128,6 +131,17 @@ fn check_step_in(loaded: &[Loaded], step: &Step) -> Vec<Block> {
     blocks
 }
 
+/// Whether a plugin may put this on a key. A key's own icon can name a picture file, but this comes
+/// from a sandboxed plugin, which has no business opening files on the computer.
+fn is_live_icon(icon: &str) -> bool {
+    (1..=MAX_LIVE_ICON_CHARS).contains(&icon.chars().count()) && !icon.chars().any(|c| matches!(c, '/' | '\\' | '.') || c.is_control())
+}
+
+/// Whether this is a colour like `#2E8B57`.
+fn is_color(color: &str) -> bool {
+    color.strip_prefix('#').is_some_and(|hex| hex.len() == 6 && hex.chars().all(|c| c.is_ascii_hexdigit()))
+}
+
 /// One frame of an animation for the whole deck.
 #[derive(Debug, Clone, PartialEq)]
 pub struct SaverFrame {
@@ -179,6 +193,9 @@ pub struct RunReport {
     pub ok: bool,
     pub message: String,
     pub title: Option<String>,
+    /// An icon and a colour to show on the key until its next run.
+    pub icon: Option<String>,
+    pub color: Option<String>,
     /// Every page or profile change, in the order they happened.
     pub navigate: Vec<Navigate>,
     /// Every change to the deck, in the order they happened.
@@ -844,6 +861,8 @@ impl Engine {
                         messages.push(outcome.message);
                     }
                     report.title = outcome.title.or(report.title);
+                    report.icon = outcome.icon.or(report.icon);
+                    report.color = outcome.color.or(report.color);
                     if let Some(navigate) = outcome.navigate {
                         report.navigate.push(navigate.clone());
                         live(Effect::Navigate(navigate));
@@ -899,6 +918,8 @@ impl Engine {
         if !deck_allowed {
             outcome.deck = None;
         }
+        outcome.icon = outcome.icon.filter(|icon| is_live_icon(icon));
+        outcome.color = outcome.color.filter(|color| is_color(color));
         Ok(outcome)
     }
 }
@@ -1042,6 +1063,46 @@ mod tests {
         let status = engine.plugin_statuses().into_iter().find(|s| s.id == "core.fake").unwrap();
         assert!(status.note.contains("kept for the app"), "{}", status.note);
         assert!(status.sha256.is_empty(), "so it can't be approved");
+    }
+
+    struct Painter;
+    impl Plugin for Painter {
+        fn info(&self) -> PluginInfo {
+            PluginInfo {
+                id: "test.painter".into(),
+                name: "Painter".into(),
+                version: "1".into(),
+                description: String::new(),
+                actions: vec![ActionSpec { id: "look".into(), name: "Look".into(), ..ActionSpec::default() }],
+            }
+        }
+        fn run(&self, request: &RunRequest, _: &HostHandle) -> Result<Outcome, String> {
+            Ok(Outcome {
+                icon: Some(request.text("icon").into()),
+                color: Some(request.text("color").into()),
+                ..Outcome::default()
+            })
+        }
+    }
+
+    #[test]
+    fn a_plugin_can_change_a_keys_icon_and_colour_but_cant_make_it_open_a_file() {
+        let (_dir, engine) = engine();
+        let engine = Engine::new(engine.paths.clone(), Vault::with_kdf(engine.paths.vault(), KdfParams { memory_kib: 1024, passes: 1, lanes: 1 }).unwrap(), vec![Arc::new(Painter)]);
+        let run = |icon: &str, color: &str| {
+            let key = Key { steps: vec![step("test.painter/look", json!({"icon": icon, "color": color}))], ..Key::default() };
+            let report = engine.run_key(&key, Trigger::Press, "test", true);
+            assert!(report.ok, "{}", report.message);
+            (report.icon, report.color)
+        };
+        assert_eq!(run("🔥", "#C0392B"), (Some("🔥".into()), Some("#C0392B".into())));
+        assert_eq!(run(SLEEP_ICON, "#c0392b"), (Some(SLEEP_ICON.into()), Some("#c0392b".into())));
+        for icon in ["/etc/passwd", "..\\secret", "photo.png", "", "\n"] {
+            assert_eq!(run(icon, "#000000").0, None, "{icon}");
+        }
+        for color in ["red", "#12345", "#1234567", "#GGGGGG", ""] {
+            assert_eq!(run("x", color).1, None, "{color}");
+        }
     }
 
     #[test]

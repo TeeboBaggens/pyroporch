@@ -80,6 +80,19 @@ fn the_api_plugin_runs_in_the_sandbox_with_its_secret_still_a_placeholder() {
     // The same plugin keeps working call after call.
     drop(sent);
     assert!(plugin.run(&request, &host).is_ok());
+
+    // Rules work across the sandbox's boundary, with their form described to the app.
+    let fields = &plugin.info().actions[0].fields;
+    assert!(fields.iter().any(|field| field.key == "rules" && field.kind == pyroporch_sdk::FieldKind::Rules));
+    let ruled = RunRequest {
+        settings: json!({
+            "url": "https://api.example.com/v1", "watch_value": "/answer/value",
+            "rules": [{"when": "above", "value": "40", "icon": "🔥", "color": "#C0392B"}]
+        }).as_object().unwrap().clone(),
+        ..request.clone()
+    };
+    let outcome = plugin.run(&ruled, &host).unwrap();
+    assert_eq!((outcome.icon.as_deref(), outcome.color.as_deref()), (Some("🔥"), Some("#C0392B")));
 }
 
 #[test]

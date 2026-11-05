@@ -63,6 +63,9 @@ built as part of the app, and no plugin can ask for them. A key using them needs
 its settings, so a later change by a file edit or an assistant voids it. Presets come from a file, so they arrive unapproved too. A key's approval
 covers every action on it and how long each one waits.
 
+A plugin can change a key's icon and colour as it runs, but only to a character or emoji and a colour. It can't name a
+file for the app to open.
+
 ## Assistants
 
 The built-in MCP server only hands an assistant placeholders, and it can't approve anything, or change security
