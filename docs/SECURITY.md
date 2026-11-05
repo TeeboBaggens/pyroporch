@@ -66,6 +66,18 @@ covers every action on it and how long each one waits.
 A plugin can change a key's icon and colour as it runs, but only to a character or emoji and a colour. It can't name a
 file for the app to open.
 
+## Updates
+
+The app only calls GitHub about updates if you tick **Check for updates automatically** or choose **Check now**, and
+nothing is installed until you choose **Install and restart**. Before it replaces anything, it checks that `SHA256SUMS`
+carries a signature from the release key, whose public half is built into the app, that the package matches its
+fingerprint, and that the new program runs and reports the right version. If any of that fails, nothing changes. Builds
+made by hand never replace themselves. An assistant can't turn checking on or install anything.
+
+The private key is kept as a secret for the release workflow, so anyone who could take over that workflow could sign a
+release. On a Mac, an updated app can lose its Accessibility permission, because builds aren't signed by Apple yet, so
+keys that press keyboard keys may need it given again.
+
 ## Assistants
 
 The built-in MCP server only hands an assistant placeholders, and it can't approve anything, or change security

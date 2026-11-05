@@ -1491,3 +1491,124 @@ fn a_new_profile_is_named_and_made_with_return() {
     assert!(harness.state().new_profile_name.is_none());
 }
 
+fn newer_release() -> pyroporch_core::update::Release {
+    pyroporch_core::update::Release {
+        version: "99.0.0".into(),
+        page: "https://github.com/TeeboBaggens/pyroporch/releases/tag/v99.0.0".into(),
+        package: "package".into(),
+        package_url: String::new(),
+        sums_url: String::new(),
+        signature_url: String::new(),
+    }
+}
+
+/// Counts the checks, and answers each with this rather than calling GitHub.
+fn fake_check(harness: &mut Harness<'_, App>, answer: Result<Option<pyroporch_core::update::Release>, String>) -> Arc<std::sync::atomic::AtomicUsize> {
+    let count = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let counter = count.clone();
+    harness.state_mut().updates.check = Arc::new(move || {
+        counter.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        answer.clone()
+    });
+    count
+}
+
+fn wait_for_update_work(harness: &mut Harness<'_, App>) {
+    for _ in 0..500 {
+        settle(harness);
+        if !harness.state().updates.checking && !harness.state().updates.installing {
+            return;
+        }
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    panic!("the update work didn't finish");
+}
+
+fn checks(count: &Arc<std::sync::atomic::AtomicUsize>) -> usize {
+    count.load(std::sync::atomic::Ordering::SeqCst)
+}
+
+#[test]
+fn nothing_calls_out_for_updates_until_the_box_is_ticked_which_checks_straight_away() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut harness = harness(&dir);
+    let count = fake_check(&mut harness, Ok(Some(newer_release())));
+    settle(&mut harness);
+    click(&mut harness, "Settings");
+    assert!(!harness.state().ws.settings.updates.check_automatically, "off to begin with");
+    assert_eq!(checks(&count), 0);
+
+    harness.get_by_label("Check for updates automatically").click_accesskit();
+    settle(&mut harness);
+    wait_for_update_work(&mut harness);
+    assert_eq!(checks(&count), 1, "the first check is right away");
+    assert!(harness.state().ws.settings.updates.last_checked > 0);
+    harness.get_by_label("Version 99.0.0 is out.");
+
+    // It doesn't ask again for 6 hours, and then it does.
+    settle(&mut harness);
+    assert_eq!(checks(&count), 1);
+    let six_hours_ago = harness.state().ws.settings.updates.last_checked - pyroporch_core::update::CHECK_EVERY_SECONDS;
+    harness.state_mut().ws.settings.updates.last_checked = six_hours_ago;
+    settle(&mut harness);
+    wait_for_update_work(&mut harness);
+    assert_eq!(checks(&count), 2);
+
+    // Unticking stops it, and doesn't check.
+    harness.get_by_label("Check for updates automatically").click_accesskit();
+    settle(&mut harness);
+    harness.state_mut().ws.settings.updates.last_checked = six_hours_ago;
+    settle(&mut harness);
+    wait_for_update_work(&mut harness);
+    assert_eq!(checks(&count), 2);
+}
+
+#[test]
+fn check_now_works_with_the_box_off_and_says_how_it_went() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut harness = harness(&dir);
+    let count = fake_check(&mut harness, Ok(None));
+    settle(&mut harness);
+    click(&mut harness, "Settings");
+    harness.get_by_label("Check now").click_accesskit();
+    wait_for_update_work(&mut harness);
+    assert_eq!(checks(&count), 1);
+    harness.get_by_label_contains("You're on the latest version");
+    assert!(!harness.state().ws.settings.updates.check_automatically);
+
+    fake_check(&mut harness, Err("no network".into()));
+    harness.get_by_label("Check now").click_accesskit();
+    wait_for_update_work(&mut harness);
+    harness.get_by_label_contains("Couldn't check for updates: no network");
+}
+
+#[test]
+fn a_new_version_shows_everywhere_and_a_failed_install_says_why_and_stays_on_offer() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut harness = harness(&dir);
+    fake_check(&mut harness, Ok(Some(newer_release())));
+    settle(&mut harness);
+    click(&mut harness, "Settings");
+    harness.get_by_label("Check now").click_accesskit();
+    wait_for_update_work(&mut harness);
+
+    // A copy built by hand doesn't offer to replace itself.
+    assert!(harness.query_by_label("Install and restart").is_none());
+    harness.get_by_label_contains("built by hand");
+    harness.state_mut().updates.can_install = true;
+    settle(&mut harness);
+    assert!(harness.query_by_label_contains("built by hand").is_none());
+
+    // From any other screen, the top bar says so and leads back here.
+    click(&mut harness, "Deck");
+    click(&mut harness, "⬆ Version 99.0.0 is out");
+    assert!(harness.state().view == View::Settings);
+
+    harness.state_mut().updates.install = Arc::new(|_| Err("this download isn't signed by the release key".into()));
+    harness.get_by_label("Install and restart").click_accesskit();
+    settle(&mut harness);
+    wait_for_update_work(&mut harness);
+    harness.get_by_label_contains("wasn't installed: this download isn't signed");
+    harness.get_by_label("Install and restart");
+}
+

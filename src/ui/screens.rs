@@ -512,6 +512,11 @@ impl App {
         let mut import = false;
         let mut quit = false;
         let mut sleep_now = false;
+        let mut check_updates = false;
+        let mut install_update = false;
+        let mut open_page = None;
+        let updates = &self.updates;
+        let (checking, installing, can_install, found, update_note) = (updates.checking, updates.installing, updates.can_install, updates.found.clone(), updates.note.clone());
         let message = self.transfer_message.clone();
         let active_name = self.profile().map_or_else(String::new, |x| x.name.clone());
         let settings = &mut self.ws.settings;
@@ -600,6 +605,46 @@ impl App {
                 ui.label(RichText::new("Close the deck maker's own app first: only one program can hold the device.").small().color(p.muted));
             });
             card(ui, p, |ui| {
+                ui.label(RichText::new("Updates").strong());
+                ui.label(format!("This is version {}.", env!("CARGO_PKG_VERSION")));
+                let automatic = ui
+                    .checkbox(&mut settings.updates.check_automatically, "Check for updates automatically")
+                    .on_hover_text("Looks on GitHub's releases page now, and every 6 hours while the app runs. Nothing is installed until you say so.");
+                if automatic.changed() {
+                    changed = true;
+                    check_updates |= settings.updates.check_automatically;
+                }
+                ui.horizontal(|ui| {
+                    if ui.add_enabled(!checking && !installing, egui::Button::new("Check now")).clicked() {
+                        check_updates = true;
+                    }
+                    if checking {
+                        ui.spinner();
+                        ui.label(RichText::new("Checking…").color(p.muted));
+                    }
+                });
+                if let Some(found) = &found {
+                    ui.colored_label(p.ok, format!("Version {} is out.", found.version));
+                    ui.horizontal(|ui| {
+                        if can_install && ui.add_enabled_ui(!installing, |ui| primary(ui, p, "Install and restart")).inner.clicked() {
+                            install_update = true;
+                        }
+                        if ui.button("What's new").clicked() {
+                            open_page = Some(found.page.clone());
+                        }
+                    });
+                    if !can_install {
+                        ui.label(RichText::new("This copy was built by hand, so it doesn't replace itself.").small().color(p.muted));
+                    }
+                }
+                if installing {
+                    ui.spinner();
+                }
+                if !update_note.is_empty() {
+                    ui.label(RichText::new(&update_note).small().color(p.muted));
+                }
+            });
+            card(ui, p, |ui| {
                 ui.label(RichText::new("Config files").strong());
                 ui.label(RichText::new(root.display().to_string()).monospace());
                 if ui.button("Open the config folder").clicked() {
@@ -631,6 +676,15 @@ impl App {
         }
         if sleep_now {
             self.asleep = true;
+        }
+        if check_updates {
+            self.check_for_updates(ui.ctx());
+        }
+        if install_update {
+            self.install_update(ui.ctx());
+        }
+        if let Some(page) = open_page {
+            self.open_path(std::path::Path::new(&page));
         }
     }
 

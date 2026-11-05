@@ -3272,7 +3272,7 @@ checksum = "d55d956fa96f5ec02be2e13af0e20391a5aa83d6a074e3ad368959d0fab299ea"
 
 [[package]]
 name = "pyroporch"
-version = "0.2.1"
+version = "0.3.0"
 dependencies = [
  "ab_glyph",
  "eframe",
@@ -3296,7 +3296,7 @@ dependencies = [
 
 [[package]]
 name = "pyroporch-core"
-version = "0.2.1"
+version = "0.3.0"
 dependencies = [
  "argon2",
  "base64",
@@ -3307,6 +3307,7 @@ dependencies = [
  "keyring",
  "libc",
  "pyroporch-sdk",
+ "ring",
  "serde",
  "serde_json",
  "sha2",
@@ -3320,7 +3321,7 @@ dependencies = [
 
 [[package]]
 name = "pyroporch-desktop"
-version = "0.2.1"
+version = "0.3.0"
 dependencies = [
  "dispatch2",
  "enigo",
@@ -3331,7 +3332,7 @@ dependencies = [
 
 [[package]]
 name = "pyroporch-plugin-api-call"
-version = "0.2.1"
+version = "0.3.0"
 dependencies = [
  "pyroporch-sdk",
  "serde_json",
@@ -3339,7 +3340,7 @@ dependencies = [
 
 [[package]]
 name = "pyroporch-plugin-screensaver"
-version = "0.2.1"
+version = "0.3.0"
 dependencies = [
  "pyroporch-sdk",
  "serde_json",
@@ -3347,7 +3348,7 @@ dependencies = [
 
 [[package]]
 name = "pyroporch-sdk"
-version = "0.2.1"
+version = "0.3.0"
 dependencies = [
  "serde",
  "serde_json",

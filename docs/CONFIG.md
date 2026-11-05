@@ -31,6 +31,10 @@ collapsed_groups = []    # groups folded away in the action list: a plugin id, "
 # colours kept for choosing again, on any key
 favorite_colors = ["#2F6FDB", "#0F8B8D", "#2E8B57", "#7A4FD0", "#A83279", "#B4532A", "#C0392B", "#B8860B", "#3A4252", "#14171C"]
 
+[updates]
+check_automatically = false   # look on the releases page every 6 hours. Installing always waits for you
+last_checked = 0              # when it last looked, in seconds since 1970
+
 [security]
 auto_lock_minutes = 15   # 0 means never
 mcp_may_use_secrets = false   # keys an assistant presses may use vault secrets

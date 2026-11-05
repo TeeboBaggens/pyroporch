@@ -33,6 +33,7 @@ pub struct Settings {
     pub security: SecuritySettings,
     pub mcp: McpSettings,
     pub hardware: HardwareSettings,
+    pub updates: UpdateSettings,
     /// Closing the window leaves the app running, so the deck keeps working.
     pub run_in_background: bool,
     /// The fingerprint of each sample plugin the app has put in the plugins folder.
@@ -50,6 +51,7 @@ impl Default for Settings {
             security: SecuritySettings::default(),
             mcp: McpSettings::default(),
             hardware: HardwareSettings::default(),
+            updates: UpdateSettings::default(),
             run_in_background: true,
             sample_hashes: BTreeMap::new(),
             presets: Vec::new(),
@@ -76,6 +78,16 @@ impl Settings {
         }
         problems
     }
+}
+
+/// Looking for new versions. Off until the person asks, as it means calling out to GitHub.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct UpdateSettings {
+    /// Looks on the releases page every 6 hours. Installing one always waits for the person.
+    pub check_automatically: bool,
+    /// When it last looked, in seconds since 1970.
+    pub last_checked: u64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

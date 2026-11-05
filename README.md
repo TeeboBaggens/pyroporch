@@ -25,6 +25,9 @@ To check a download, compare it with `SHA256SUMS` on the release, or run
 `gh attestation verify <file> --repo TeeboBaggens/pyroporch` to confirm GitHub built it from this repo.
 For an assistant on a Mac, the program to point at is `Pyro Porch.app/Contents/MacOS/pyroporch`.
 
+The app can tell you about new versions and install them with one click. It's off until you tick **Check for updates
+automatically** in Settings, or choose **Check now**. See [Security](docs/SECURITY.md#updates) for how downloads are checked.
+
 To build it yourself, you'll need [Rust](https://rustup.rs). The right version is pinned in `rust-toolchain.toml`, and rustup fetches it
 by itself.
 
