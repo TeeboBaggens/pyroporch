@@ -24,6 +24,6 @@ jobs:
         run: sudo apt-get update && sudo apt-get install -y libudev-dev libxkbcommon-dev libx11-dev libwayland-dev libgl1-mesa-dev
       - name: Install the pinned Rust
         run: rustup toolchain install
-      - uses: Swatinem/rust-cache@v2.9.3
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
       - run: cargo clippy --workspace --all-targets -- -D warnings
       - run: cargo test --workspace --no-fail-fast
