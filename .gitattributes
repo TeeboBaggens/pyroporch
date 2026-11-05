@@ -1,4 +1,5 @@
-* text=auto
-*.sh text eol=lf
+# LF everywhere, Windows too: the guides and plugin manifests are built into the app, and it and its
+# tests read them as text.
+* text=auto eol=lf
 *.wasm binary
 *.png binary

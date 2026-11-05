@@ -70,7 +70,7 @@ jobs:
       - name: Install the pinned Rust
         run: rustup toolchain install
       # No build cache here: what gets published is built from nothing but the tagged code.
-      - run: cargo test --workspace --locked
+      - run: cargo test --workspace --locked --no-fail-fast
       - run: cargo build --release --locked
       - name: Gather the files
         run: |
