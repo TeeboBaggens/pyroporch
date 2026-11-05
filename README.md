@@ -2,7 +2,7 @@
 
 A lean button deck: a grid of keys that open things, press hotkeys, call APIs and more. It works
 on screen and with a USB deck, and keeps running in the background. Written in Rust, for macOS,
-Windows and Linux. The name is a play on a deck by a stream: a porch, with a fire.
+Windows and Linux.
 
 ## Run it
 
