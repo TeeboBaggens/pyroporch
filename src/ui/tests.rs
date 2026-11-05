@@ -1592,7 +1592,10 @@ fn a_new_version_shows_everywhere_and_a_failed_install_says_why_and_stays_on_off
     harness.get_by_label("Check now").click_accesskit();
     wait_for_update_work(&mut harness);
 
-    // A copy built by hand doesn't offer to replace itself.
+    // A copy built by hand doesn't offer to replace itself. Set here, as the release workflow's
+    // tests run as a copy that can.
+    harness.state_mut().updates.can_install = false;
+    settle(&mut harness);
     assert!(harness.query_by_label("Install and restart").is_none());
     harness.get_by_label_contains("built by hand");
     harness.state_mut().updates.can_install = true;
