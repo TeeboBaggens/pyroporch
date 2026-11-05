@@ -88,11 +88,11 @@ fn an_assistant_adds_a_working_key_end_to_end() {
     assert!(!saved.contains("Leak"));
 
     // A reference is fine, and the person gets asked for what only they can decide.
-    let (failed, secret) = client.call("request_secret", json!({
+    let (failed, asked) = client.call("request_secret", json!({
         "name": "svc_key", "hosts": ["api.example.com"], "reason": "For the status key"
     }));
-    assert!(!failed, "{secret}");
-    let reference = secret["reference"].as_str().unwrap().to_string();
+    assert!(!failed, "{asked}");
+    let reference = asked["reference"].as_str().unwrap().to_string();
     let (failed, reply) = client.call("set_key", json!({
         "row": 2, "col": 0, "title": "Status", "icon": "🌐",
         "steps": [{"action": "pyroporch.api-call/request", "settings": {
