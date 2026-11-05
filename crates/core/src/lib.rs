@@ -3,6 +3,7 @@
 
 pub mod config;
 pub mod engine;
+pub mod label;
 pub mod mcp;
 pub mod migrate;
 pub mod paths;

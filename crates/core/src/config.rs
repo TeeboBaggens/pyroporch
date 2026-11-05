@@ -195,6 +195,8 @@ pub struct Key {
     pub row: u32,
     pub col: u32,
     pub title: String,
+    /// Which part of the key its title sits against: `top`, `middle` or `bottom`.
+    pub title_position: String,
     /// One character, or a path to a PNG or JPEG.
     pub icon: String,
     /// A stored picture filling the key, by its file name in the images folder.
@@ -1298,6 +1300,7 @@ mod tests {
             row: 0,
             col: 0,
             title: String::new(),
+            title_position: String::new(),
             icon: String::new(),
             background: String::new(),
             color: String::new(),
