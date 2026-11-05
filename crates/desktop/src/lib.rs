@@ -39,7 +39,7 @@ impl Plugin for DesktopActions {
                     Field::new("url", "Address", FieldKind::Url).required(),
                 ]),
                 action("open_path", "Open App or File", "Open an application, file or folder.", "📂", Risk::High, vec![
-                    Field::new("path", "Path", FieldKind::Text).required(),
+                    Field::new("path", "Path", FieldKind::LocalPath { folders: true }).required(),
                 ]),
                 action("press_key", "Press a Key", "Press one key, such as F13 or Page Down.", "🔘", Risk::High, vec![
                     Field::new("keys", "Key", FieldKind::Hotkey).required(),
@@ -62,7 +62,7 @@ impl Plugin for DesktopActions {
                     Field::new("text", "Text", FieldKind::MultiLine).required(),
                 ]),
                 action("run_command", "Run Command", "Run a program with arguments.", "⚙", Risk::High, vec![
-                    Field::new("program", "Program", FieldKind::Text).required(),
+                    Field::new("program", "Program", FieldKind::LocalPath { folders: false }).required(),
                     Field::new("args", "Arguments", FieldKind::Text).help("Separated by spaces."),
                 ]),
             ],
@@ -110,7 +110,9 @@ impl Plugin for DesktopActions {
             "run_command" => {
                 let program = request.text("program");
                 // No shell in between, so nothing in the settings can be read as shell syntax.
-                let mut child = std::process::Command::new(program)
+                let (start, before) = how_to_start(program);
+                let mut child = std::process::Command::new(start)
+                    .args(before)
                     .args(request.text("args").split_whitespace())
                     .stdin(std::process::Stdio::null())
                     .stdout(std::process::Stdio::null())
@@ -126,6 +128,15 @@ impl Plugin for DesktopActions {
             other => Err(format!("unknown action: {other}")),
         }
     }
+}
+
+/// What to run to start a program, and what goes before its arguments. A Mac app is really a folder,
+/// so only the system can start one.
+fn how_to_start(program: &str) -> (&str, Vec<&str>) {
+    if cfg!(target_os = "macos") && std::path::Path::new(program).extension().is_some_and(|extension| extension == "app") {
+        return ("/usr/bin/open", vec!["-a", program, "--args"]);
+    }
+    (program, Vec::new())
 }
 
 /// Runs keyboard work where the system allows it. On a Mac, looking up the keyboard layout from any
@@ -308,6 +319,17 @@ mod tests {
         }
         assert!(parse_combo("f99").is_err());
         assert!(parse_combo("").is_err());
+    }
+
+    #[test]
+    fn a_mac_app_is_started_by_the_system_and_anything_else_directly() {
+        assert_eq!(how_to_start("/usr/bin/true"), ("/usr/bin/true", Vec::new()));
+        let app = how_to_start("/Applications/Some App.app");
+        if cfg!(target_os = "macos") {
+            assert_eq!(app, ("/usr/bin/open", vec!["-a", "/Applications/Some App.app", "--args"]));
+        } else {
+            assert_eq!(app.0, "/Applications/Some App.app");
+        }
     }
 
     #[test]

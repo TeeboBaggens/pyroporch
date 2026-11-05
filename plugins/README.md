@@ -238,6 +238,7 @@ Each field is one setting in the form. `Field::new(key, label, kind)` makes one,
 | `Secret` | A masked field that stores into the vault | Only ever a `{{secret:name}}` reference | `request.text("key")` |
 | `Hotkey` | A key recorder | Text, like `ctrl+shift+m` | `request.text("key")` |
 | `KeyValues` | Rows of names and values | Name and value pairs. Values can hold references | `request.pairs("key")` |
+| `LocalPath { folders }` | A text box with browse buttons, one for folders only if `folders` is true | Text, the path | `request.text("key")` |
 | `Rules` | Rows of a test, a value, an icon and two colours | A list of `Rule`s. Use `rule.matches(value)` to test one | `request.rules("key")?` |
 
 Three things to allow for:

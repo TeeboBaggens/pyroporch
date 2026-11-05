@@ -1615,3 +1615,121 @@ fn a_new_version_shows_everywhere_and_a_failed_install_says_why_and_stays_on_off
     harness.get_by_label("Install and restart");
 }
 
+/// Puts this action on the API Status key, and opens it in the form.
+fn with_action(harness: &mut Harness<'_, App>, action: &str, settings: serde_json::Value) {
+    let (_, key) = status_key(harness);
+    key.steps = vec![pyroporch_core::config::Step { action: action.into(), settings: settings.as_object().unwrap().clone(), delay_ms: 0 }];
+    settle(harness);
+    click(harness, "API Status");
+}
+
+fn pick_answer(pick: deck::Pick) -> Option<PathBuf> {
+    Some(PathBuf::from(match pick {
+        deck::Pick::FileOrApp => "/Applications/Some App.app",
+        deck::Pick::Folder => "/Users/someone/Documents",
+        deck::Pick::Icon => "/Users/someone/icon.png",
+    }))
+}
+
+fn setting(harness: &mut Harness<'_, App>, name: &str) -> String {
+    status_key(harness).1.steps[0].settings.get(name).and_then(|value| value.as_str()).unwrap_or("").to_string()
+}
+
+#[test]
+fn a_path_can_be_browsed_for_as_an_app_or_a_folder_and_still_typed() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut harness = harness(&dir);
+    settle(&mut harness);
+    harness.state_mut().pick_path = pick_answer;
+    with_action(&mut harness, "pyroporch.desktop/open_path", serde_json::json!({"path": "/typed/by/hand"}));
+    assert!(harness.query_all_by_role(Role::TextInput).any(|node| node.value().as_deref() == Some("/typed/by/hand")));
+
+    harness.get_by_label("File or app…").click_accesskit();
+    settle(&mut harness);
+    assert_eq!(setting(&mut harness, "path"), "/Applications/Some App.app");
+
+    harness.get_by_label("Folder…").click_accesskit();
+    settle(&mut harness);
+    assert_eq!(setting(&mut harness, "path"), "/Users/someone/Documents");
+
+    // Closing the dialog without choosing leaves what was there.
+    harness.state_mut().pick_path = |_| None;
+    harness.get_by_label("Folder…").click_accesskit();
+    settle(&mut harness);
+    assert_eq!(setting(&mut harness, "path"), "/Users/someone/Documents");
+}
+
+#[test]
+fn a_program_is_browsed_for_but_a_folder_is_not_offered() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut harness = harness(&dir);
+    settle(&mut harness);
+    harness.state_mut().pick_path = pick_answer;
+    with_action(&mut harness, "pyroporch.desktop/run_command", serde_json::json!({"program": "/bin/sh"}));
+    assert!(harness.query_by_label("Folder…").is_none());
+    harness.get_by_label("File or app…").click_accesskit();
+    settle(&mut harness);
+    assert_eq!(setting(&mut harness, "program"), "/Applications/Some App.app");
+}
+
+#[test]
+fn a_keys_icon_can_be_browsed_for() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut harness = harness(&dir);
+    settle(&mut harness);
+    harness.state_mut().pick_path = pick_answer;
+    click(&mut harness, "API Status");
+    harness.get_by_label("Icon from a file…").click_accesskit();
+    settle(&mut harness);
+    assert_eq!(status_key(&mut harness).1.icon, "/Users/someone/icon.png");
+}
+
+/// Types letters one at a time, as a person does, into the box with this label.
+fn type_letters(harness: &mut Harness<'_, App>, label: &str, letters: &str) {
+    harness.get_by_role_and_label(Role::TextInput, label).focus();
+    settle(harness);
+    for letter in letters.chars() {
+        harness.input_mut().events.push(egui::Event::Text(letter.to_string()));
+        settle(harness);
+    }
+}
+
+#[test]
+fn a_box_keeps_the_keyboard_while_typing_even_as_warnings_come_and_go() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut harness = harness(&dir);
+    settle(&mut harness);
+
+    // A required setting that's empty has a warning, which goes with the first letter typed.
+    with_action(&mut harness, "pyroporch.desktop/open_path", serde_json::json!({}));
+    type_letters(&mut harness, "Path", "/abc");
+    assert_eq!(setting(&mut harness, "path"), "/abc");
+
+    with_action(&mut harness, "pyroporch.desktop/run_command", serde_json::json!({}));
+    type_letters(&mut harness, "Program", "/bin");
+    assert_eq!(setting(&mut harness, "program"), "/bin");
+    type_letters(&mut harness, "Arguments", "-la");
+    assert_eq!(setting(&mut harness, "args"), "-la");
+
+    // An address turns into one with a site to allow, part way through typing it.
+    with_action(&mut harness, "pyroporch.api-call/request", serde_json::json!({}));
+    type_letters(&mut harness, "Address", "https://a.example/x");
+    assert_eq!(setting(&mut harness, "url"), "https://a.example/x");
+    type_letters(&mut harness, "Show on key", "/a");
+    assert_eq!(setting(&mut harness, "show_value"), "/a");
+    type_letters(&mut harness, "Watch", "/b");
+    assert_eq!(setting(&mut harness, "watch_value"), "/b");
+
+    // A mistake in a box brings up its own warning, part way through typing it.
+    type_letters(&mut harness, "Address", "/?token=abc");
+    let draft = harness.state().draft.clone().expect("a plain credential is held back, not saved");
+    assert!(draft.steps[0].settings["url"].as_str().unwrap().contains("/?token=abc"));
+    harness.state_mut().draft = None;
+    settle(&mut harness);
+
+    // The key's own title changes what's drawn on the key above it.
+    click(&mut harness, "API Status");
+    type_letters(&mut harness, "Title", "xy");
+    assert!(status_key(&mut harness).1.title.ends_with("xy"));
+}
+

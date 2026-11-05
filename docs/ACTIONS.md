@@ -40,12 +40,12 @@ approving again.
 | Action | What it does | Settings | Needs approval |
 |---|---|---|---|
 | `pyroporch.desktop/open_url` | Opens an http or https address in the browser | `url`, *required* | No |
-| `pyroporch.desktop/open_path` | Opens an application, file or folder | `path`, *required* | Yes |
+| `pyroporch.desktop/open_path` | Opens an application, file or folder. The form can browse for it | `path`, *required* | Yes |
 | `pyroporch.desktop/press_key` | Presses one key | `keys`, *required* | Yes |
 | `pyroporch.desktop/hotkey` | Presses a key combination | `keys`, *required* | Yes |
 | `pyroporch.desktop/media` | Sends a media key | `key`, *required*: `play/pause`, `next`, `previous`, `volume up`, `volume down` or `mute` | Yes |
 | `pyroporch.desktop/type_text` | Types a piece of text | `text`, *required* | Yes |
-| `pyroporch.desktop/run_command` | Starts a program, with no shell in between | `program`, *required*. `args`: separated by spaces | Yes |
+| `pyroporch.desktop/run_command` | Starts a program, with no shell in between. The form can browse for it, and on a Mac it can be an `.app` | `program`, *required*. `args`: separated by spaces | Yes |
 
 On a Mac, pressing and typing need Pyro Porch allowed under Privacy & Security > Accessibility.
 
