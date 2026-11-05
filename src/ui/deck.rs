@@ -1063,6 +1063,7 @@ impl App {
         let mut untrusted = false;
         let mut allow_site: Option<(String, String)> = None;
         let mut favorites = self.ws.settings.ui.favorite_colors.clone();
+        let mut browse: Option<Browse> = None;
         let lantern = self.drawn_icon(ui.ctx(), SLEEP_ICON);
 
         let total = ui.available_width();
@@ -1070,7 +1071,7 @@ impl App {
             ui.allocate_ui(Vec2::new(total * 0.26, ui.available_height()), |ui| {
                 ui.vertical(|ui| {
                     ui.set_width(total * 0.26);
-                    key_look_form(ui, &mut key, &mut favorites, lantern, p, &mut choose_picture);
+                    key_look_form(ui, &mut key, &mut favorites, lantern, p, &mut choose_picture, &mut browse);
                 });
             });
             ui.separator();
@@ -1103,7 +1104,9 @@ impl App {
                         ui.label(format!("Opens its own screen, with {in_folder_count} key(s) in it."));
                         ui.label(RichText::new("Drop keys and actions on this key to put them inside. Its first slot is always the way back.").small().color(p.muted));
                     } else {
-                        self.key_notices(ui, &key, p, &mut approve, &mut allow_site);
+                        // In a slot of its own: warnings come and go while typing, and if that
+                        // moved the boxes below along, the one being typed in would lose the keyboard.
+                        ui.scope(|ui| self.key_notices(ui, &key, p, &mut approve, &mut allow_site));
                         if key.steps.len() > 1 {
                             ui.label(RichText::new("Runs these in order, and stops if one fails.").small().color(p.muted));
                         }
@@ -1115,7 +1118,7 @@ impl App {
                             preview = Some((plugin.to_string(), step.settings.clone()));
                         }
                         egui::ScrollArea::vertical().id_salt("steps").auto_shrink(false).show(ui, |ui| {
-                            self.steps_form(ui, &mut key, &mut favorites, p, &mut new_secret);
+                            self.steps_form(ui, &mut key, &mut favorites, p, &mut new_secret, &mut browse);
                             dropped_step = add_action_zone(ui, p);
                             self.add_action_menu(ui, &mut picked_action);
                         });
@@ -1174,6 +1177,20 @@ impl App {
         }
         if let Some(payload) = dropped_step {
             untrusted |= self.add_to_draft(&mut key, (*payload).clone());
+        }
+        // After the form is drawn, because this waits for the system's dialog to close.
+        if let Some(browse) = browse
+            && let Some(path) = (self.pick_path)(browse.pick)
+        {
+            let path = path.to_string_lossy().into_owned();
+            match browse.setting {
+                Some((step, setting)) => {
+                    if let Some(step) = key.steps.get_mut(step) {
+                        step.settings.insert(setting, Value::String(path));
+                    }
+                }
+                None => key.icon = path,
+            }
         }
         if approve {
             key.approve();
@@ -1293,7 +1310,8 @@ impl App {
         }
     }
 
-    fn steps_form(&self, ui: &mut Ui, key: &mut Key, favorites: &mut Vec<String>, p: Palette, new_secret: &mut Option<SecretTarget>) {
+    #[allow(clippy::too_many_arguments)]
+    fn steps_form(&self, ui: &mut Ui, key: &mut Key, favorites: &mut Vec<String>, p: Palette, new_secret: &mut Option<SecretTarget>, browse: &mut Option<Browse>) {
         if key.steps.is_empty() {
             ui.label(RichText::new("Nothing yet. Drag an action onto this key.").color(p.muted));
         }
@@ -1346,7 +1364,7 @@ impl App {
                             continue;
                         }
                         let label = ui.label(&field.label).on_hover_text(&field.help);
-                        field_form(ui, field, label.id, &mut step.settings, &names, index, &id, new_secret, favorites, p);
+                        field_form(ui, field, label.id, &mut step.settings, &names, index, &id, new_secret, favorites, p, browse);
                         ui.end_row();
                     }
                     if numbered && index > 0 {
@@ -1415,6 +1433,31 @@ fn library_item(ui: &mut Ui, p: Palette, icon: &str, drawn: Option<egui::Texture
         .response;
     if !description.is_empty() {
         response.on_hover_text(description);
+    }
+}
+
+/// What a browse button is looking for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Pick {
+    /// On a Mac this includes apps, which the system treats as files here.
+    FileOrApp,
+    Folder,
+    Icon,
+}
+
+/// A browse button that was pressed, and where the answer goes.
+struct Browse {
+    pick: Pick,
+    /// The step and setting to fill in, or the key's icon if nothing's here.
+    setting: Option<(usize, String)>,
+}
+
+pub fn ask_system_for_path(pick: Pick) -> Option<std::path::PathBuf> {
+    let dialog = rfd::FileDialog::new();
+    match pick {
+        Pick::FileOrApp => dialog.set_title("Choose an app or file").pick_file(),
+        Pick::Folder => dialog.set_title("Choose a folder").pick_folder(),
+        Pick::Icon => dialog.set_title("Choose an icon").add_filter("Pictures", &["png", "jpg", "jpeg"]).pick_file(),
     }
 }
 
@@ -1507,7 +1550,8 @@ fn add_action_zone(ui: &mut Ui, p: Palette) -> Option<Arc<Drag>> {
     payload
 }
 
-fn key_look_form(ui: &mut Ui, key: &mut Key, favorites: &mut Vec<String>, lantern: Option<egui::TextureId>, p: Palette, choose_picture: &mut bool) {
+#[allow(clippy::too_many_arguments)]
+fn key_look_form(ui: &mut Ui, key: &mut Key, favorites: &mut Vec<String>, lantern: Option<egui::TextureId>, p: Palette, choose_picture: &mut bool, browse: &mut Option<Browse>) {
     ui.label(RichText::new("Look").strong());
     egui::Grid::new("look").num_columns(2).spacing([10.0, 6.0]).show(ui, |ui| {
         let label = ui.label("Title");
@@ -1542,6 +1586,12 @@ fn key_look_form(ui: &mut Ui, key: &mut Key, favorites: &mut Vec<String>, lanter
                 }
             });
         });
+        ui.end_row();
+
+        ui.label("");
+        if ui.small_button("Icon from a file…").on_hover_text("Browse for a PNG or JPEG to use as the icon").clicked() {
+            *browse = Some(Browse { pick: Pick::Icon, setting: None });
+        }
         ui.end_row();
 
         ui.label("Icon colour");
@@ -1650,7 +1700,7 @@ pub fn add_favorite(favorites: &mut Vec<String>, color: &str) {
 
 /// Draws the right editor for one setting, from the plugin's description of it.
 #[allow(clippy::too_many_arguments)]
-fn field_form(ui: &mut Ui, field: &Field, label: egui::Id, settings: &mut Map<String, Value>, secrets: &[String], step: usize, id: &KeyId, new_secret: &mut Option<SecretTarget>, favorites: &mut Vec<String>, p: Palette) {
+fn field_form(ui: &mut Ui, field: &Field, label: egui::Id, settings: &mut Map<String, Value>, secrets: &[String], step: usize, id: &KeyId, new_secret: &mut Option<SecretTarget>, favorites: &mut Vec<String>, p: Palette, browse: &mut Option<Browse>) {
     let key = field.key.as_str();
     let width = 320.0_f32.min(ui.available_width() - 4.0);
     match &field.kind {
@@ -1726,6 +1776,21 @@ fn field_form(ui: &mut Ui, field: &Field, label: egui::Id, settings: &mut Map<St
             }
         }
         FieldKind::KeyValues => key_values_form(ui, key, label, settings, secrets, width),
+        FieldKind::LocalPath { folders } => {
+            let mut text = settings.get(key).and_then(Value::as_str).unwrap_or("").to_string();
+            ui.horizontal(|ui| {
+                if ui.add(egui::TextEdit::singleline(&mut text).desired_width(width - if *folders { 170.0 } else { 90.0 }).hint_text(&field.help)).labelled_by(label).changed() {
+                    settings.insert(key.into(), Value::String(text));
+                }
+                let mut browse_for = |pick| *browse = Some(Browse { pick, setting: Some((step, field.key.clone())) });
+                if ui.button("File or app…").on_hover_text("Browse for an app, program or file").clicked() {
+                    browse_for(Pick::FileOrApp);
+                }
+                if *folders && ui.button("Folder…").on_hover_text("Browse for a folder").clicked() {
+                    browse_for(Pick::Folder);
+                }
+            });
+        }
         FieldKind::Rules => rules_form(ui, key, label, settings, favorites, p),
     }
 }
@@ -1808,6 +1873,7 @@ fn key_values_form(ui: &mut Ui, key: &str, label: egui::Id, settings: &mut Map<S
     let mut remove = None;
     ui.vertical(|ui| {
         for (index, (name, value)) in pairs.iter_mut().enumerate() {
+            ui.push_id(index, |ui| {
             ui.horizontal(|ui| {
                 ui.add(egui::TextEdit::singleline(name).desired_width(width * 0.38).hint_text("Name")).labelled_by(label);
                 ui.add(egui::TextEdit::singleline(value).desired_width(width * 0.38).hint_text("Value")).labelled_by(label);
@@ -1828,6 +1894,7 @@ fn key_values_form(ui: &mut Ui, key: &str, label: egui::Id, settings: &mut Map<S
             if !find_refs(value).is_empty() {
                 ui.label(RichText::new("Filled in from the vault when sent").small());
             }
+            });
         }
         if ui.small_button("+ Add").clicked() {
             // A free name, because two of the same name would become one, losing a value.

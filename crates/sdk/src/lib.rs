@@ -155,6 +155,9 @@ pub enum FieldKind {
     Hotkey,
     /// Name and value pairs, such as HTTP headers. Values may contain secret references.
     KeyValues,
+    /// A place on this computer, as text the person can type or browse for. `folders` also offers
+    /// choosing a folder, for an action that can use one.
+    LocalPath { folders: bool },
     /// Rows saying how the key should look for a value. Read it with [`RunRequest::rules`].
     Rules,
 }

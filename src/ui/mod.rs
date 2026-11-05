@@ -1,7 +1,7 @@
 //! The window: app state, the top bar, background work and the screenshot option.
 
 mod crop;
-mod deck;
+pub mod deck;
 #[cfg(test)]
 pub use deck::STATUS_ICON_CHOICES;
 mod hotkey;
@@ -177,6 +177,8 @@ pub struct App {
     pub confirm_delete_page: Option<usize>,
     undo: UndoHistory,
     pub updates: updates::Updates,
+    /// Asks the system for a file or folder. Only tests use anything else.
+    pub pick_path: fn(deck::Pick) -> Option<PathBuf>,
     pub show_requests: bool,
     pub pending: Pending,
     pub grants: Grants,
@@ -291,6 +293,7 @@ impl App {
             confirm_delete_page: None,
             undo: UndoHistory::default(),
             updates: updates::Updates::new(),
+            pick_path: deck::ask_system_for_path,
             show_requests: false,
             pending,
             grants,
