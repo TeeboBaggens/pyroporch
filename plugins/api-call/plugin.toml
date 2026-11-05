@@ -1,7 +1,7 @@
 # A plugin is one folder holding this file and the plugin's built code.
 id = "pyroporch.api-call"
 name = "API Calls"
-version = "0.1.1"
+version = "0.2.0"
 description = "Call a web API when a key is pressed, and show the answer on the key."
 wasm = "plugin.wasm"
 

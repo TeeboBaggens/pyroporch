@@ -15,16 +15,17 @@ use std::sync::Arc;
 use std::time::Duration;
 
 const KEY_GAP: f32 = 12.0;
+/// How big a drawn icon is in the icon picker.
+const ICON_BUTTON_SIZE: f32 = 22.0;
+/// The most favourite colours kept. Adding another lets go of the oldest.
+const MAX_FAVORITE_COLORS: usize = 32;
 const MAX_KEY_SIZE: f32 = 112.0;
 const FLASH: Duration = Duration::from_millis(600);
 const GRID_CHOICES: [(u32, u32); 6] = [(2, 3), (3, 3), (3, 5), (4, 5), (4, 8), (5, 8)];
-const COLOR_CHOICES: [&str; 10] = [
-    "#2F6FDB", "#0F8B8D", "#2E8B57", "#7A4FD0", "#A83279", "#B4532A", "#C0392B", "#B8860B", "#3A4252", "#14171C",
-];
 /// The ones a status is most likely to want, for a key that changes its look by itself.
 pub const STATUS_ICON_CHOICES: [&str; 6] = ["✅", "⚠", "❌", "🔥", "⛔", "❓"];
-const ICON_CHOICES: [&str; 24] = [
-    "🔗", "🌐", "▶", "⏸", "🔊", "🔉", "🔇", "🎤", "📷", "⌨", "✏", "⚙", "🚀", "⭐", "💡", "🏠", "📁", "📄", "📅", "✉", "🔒", "➡", "⬅", "⏱",
+const ICON_CHOICES: [&str; 26] = [
+    "🔗", "🌐", "▶", "⏸", "⏮", "⏭", "🔊", "🔉", "🔇", "🎤", "📷", "⌨", "✏", "⚙", "🚀", "⭐", "💡", "🏠", "📁", "📄", "📅", "✉", "🔒", "➡", "⬅", "⏱",
 ];
 
 /// What is being dragged.
@@ -783,7 +784,7 @@ impl App {
             return;
         };
 
-        let KeyLook { title, icon, color: color_text } = self.key_look(key);
+        let KeyLook { title, icon, icon_color, color: color_text } = self.key_look(key);
         let fill = parse_color(&color_text).unwrap_or(p.raised);
         let fill = if response.is_pointer_button_down_on() { fill.gamma_multiply(0.75) } else { fill };
         let mut text = parse_color(&key.text_color).unwrap_or_else(|| readable_on(fill));
@@ -814,7 +815,7 @@ impl App {
                 painter.image(texture.id(), image_rect, egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)), Color32::WHITE);
             }
         } else if !icon.is_empty() {
-            painter.text(egui::pos2(rect.center().x, icon_y), Align2::CENTER_CENTER, &icon, FontId::proportional(icon_size), text);
+            painter.text(egui::pos2(rect.center().x, icon_y), Align2::CENTER_CENTER, &icon, FontId::proportional(icon_size), parse_color(&icon_color).unwrap_or(text));
         }
         if has_title {
             let font = FontId::proportional((rect.width() * 0.125).clamp(9.0, 13.0));
@@ -1000,13 +1001,15 @@ impl App {
         // A step came from a file, so the key's approval doesn't carry over to it.
         let mut untrusted = false;
         let mut allow_site: Option<(String, String)> = None;
+        let mut favorites = self.ws.settings.ui.favorite_colors.clone();
+        let lantern = self.drawn_icon(ui.ctx(), SLEEP_ICON);
 
         let total = ui.available_width();
         ui.horizontal_top(|ui| {
             ui.allocate_ui(Vec2::new(total * 0.26, ui.available_height()), |ui| {
                 ui.vertical(|ui| {
                     ui.set_width(total * 0.26);
-                    key_look_form(ui, &mut key, p, &mut choose_picture);
+                    key_look_form(ui, &mut key, &mut favorites, lantern, p, &mut choose_picture);
                 });
             });
             ui.separator();
@@ -1051,7 +1054,7 @@ impl App {
                             preview = Some((plugin.to_string(), step.settings.clone()));
                         }
                         egui::ScrollArea::vertical().id_salt("steps").auto_shrink(false).show(ui, |ui| {
-                            self.steps_form(ui, &mut key, p, &mut new_secret);
+                            self.steps_form(ui, &mut key, &mut favorites, p, &mut new_secret);
                             dropped_step = add_action_zone(ui, p);
                             self.add_action_menu(ui, &mut picked_action);
                         });
@@ -1062,6 +1065,10 @@ impl App {
             ui.vertical(|ui| self.activity(ui, p));
         });
 
+        if favorites != self.ws.settings.ui.favorite_colors {
+            self.ws.settings.ui.favorite_colors = favorites;
+            self.mark_settings_dirty();
+        }
         if let Some((plugin, site)) = allow_site {
             match Grants::allow_host(&self.ws.paths, &plugin, &site) {
                 Ok(()) => {
@@ -1225,7 +1232,7 @@ impl App {
         }
     }
 
-    fn steps_form(&self, ui: &mut Ui, key: &mut Key, p: Palette, new_secret: &mut Option<SecretTarget>) {
+    fn steps_form(&self, ui: &mut Ui, key: &mut Key, favorites: &mut Vec<String>, p: Palette, new_secret: &mut Option<SecretTarget>) {
         if key.steps.is_empty() {
             ui.label(RichText::new("Nothing yet. Drag an action onto this key.").color(p.muted));
         }
@@ -1278,7 +1285,7 @@ impl App {
                             continue;
                         }
                         let label = ui.label(&field.label).on_hover_text(&field.help);
-                        field_form(ui, field, label.id, &mut step.settings, &names, index, &id, new_secret, p);
+                        field_form(ui, field, label.id, &mut step.settings, &names, index, &id, new_secret, favorites, p);
                         ui.end_row();
                     }
                     if numbered && index > 0 {
@@ -1439,7 +1446,7 @@ fn add_action_zone(ui: &mut Ui, p: Palette) -> Option<Arc<Drag>> {
     payload
 }
 
-fn key_look_form(ui: &mut Ui, key: &mut Key, p: Palette, choose_picture: &mut bool) {
+fn key_look_form(ui: &mut Ui, key: &mut Key, favorites: &mut Vec<String>, lantern: Option<egui::TextureId>, p: Palette, choose_picture: &mut bool) {
     ui.label(RichText::new("Look").strong());
     egui::Grid::new("look").num_columns(2).spacing([10.0, 6.0]).show(ui, |ui| {
         let label = ui.label("Title");
@@ -1448,7 +1455,12 @@ fn key_look_form(ui: &mut Ui, key: &mut Key, p: Palette, choose_picture: &mut bo
 
         let label = ui.label("Icon");
         ui.horizontal(|ui| {
-            ui.add(egui::TextEdit::singleline(&mut key.icon).desired_width(70.0).hint_text("🔗 or a file")).labelled_by(label.id);
+            // A drawn icon's name means nothing to anyone, so it shows as what it is.
+            if let (true, Some(texture)) = (key.icon.starts_with(DRAWN_ICON_PREFIX), lantern) {
+                ui.add(egui::Image::new((texture, Vec2::splat(ICON_BUTTON_SIZE)))).labelled_by(label.id);
+            } else {
+                ui.add(egui::TextEdit::singleline(&mut key.icon).desired_width(70.0).hint_text("🔗 or a file")).labelled_by(label.id);
+            }
             ui.menu_button("Pick", |ui| {
                 ui.set_max_width(210.0);
                 ui.horizontal_wrapped(|ui| {
@@ -1459,16 +1471,24 @@ fn key_look_form(ui: &mut Ui, key: &mut Key, p: Palette, choose_picture: &mut bo
                         }
                     }
                 });
-                if ui.button("Lantern gone out").clicked() {
-                    key.icon = SLEEP_ICON.into();
-                    ui.close();
+                if let Some(texture) = lantern {
+                    let button = ui.add(egui::Button::image((texture, Vec2::splat(ICON_BUTTON_SIZE)))).on_hover_text("Lantern gone out");
+                    button.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, true, "Lantern gone out"));
+                    if button.clicked() {
+                        key.icon = SLEEP_ICON.into();
+                        ui.close();
+                    }
                 }
             });
         });
         ui.end_row();
 
-        ui.label("Colour");
-        color_row(ui, &mut key.color, p);
+        ui.label("Icon colour");
+        color_button(ui, "Icon colour", &mut key.icon_color, favorites, p);
+        ui.end_row();
+
+        ui.label("Background");
+        color_button(ui, "Background", &mut key.color, favorites, p);
         ui.end_row();
 
         ui.label("Picture");
@@ -1492,36 +1512,84 @@ fn key_look_form(ui: &mut Ui, key: &mut Key, p: Palette, choose_picture: &mut bo
             ui.add(egui::TextEdit::singleline(&mut key.alt_title).desired_width(ui.available_width() - 4.0)).labelled_by(label.id);
             ui.end_row();
             ui.label("Other colour");
-            color_row(ui, &mut key.alt_color, p);
+            color_button(ui, "Other colour", &mut key.alt_color, favorites, p);
             ui.end_row();
         }
     });
 }
 
-fn color_row(ui: &mut Ui, value: &mut String, p: Palette) {
-    ui.horizontal(|ui| {
-        let mut color = parse_color(value).unwrap_or(p.raised);
-        if ui.color_edit_button_srgba(&mut color).changed() {
+/// A swatch that opens a colour picker, along with the colours kept for choosing again.
+fn color_button(ui: &mut Ui, name: &str, value: &mut String, favorites: &mut Vec<String>, p: Palette) {
+    let mut color = parse_color(value).unwrap_or(p.raised);
+    let swatch = ui.add(egui::Button::new("     ").fill(color)).on_hover_text(name);
+    swatch.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, true, format!("Choose {name}")));
+    egui::Popup::menu(&swatch).close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside).show(|ui| {
+        ui.set_max_width(260.0);
+        if egui::color_picker::color_picker_color32(ui, &mut color, egui::color_picker::Alpha::Opaque) {
             *value = color_hex(color);
         }
-        ui.menu_button("Pick", |ui| {
-            ui.set_max_width(160.0);
-            ui.horizontal_wrapped(|ui| {
-                for choice in COLOR_CHOICES {
-                    let swatch = parse_color(choice).unwrap_or(p.raised);
-                    if ui.add(egui::Button::new("    ").fill(swatch)).clicked() {
-                        *value = choice.into();
-                        ui.close();
-                    }
-                }
-            });
+        ui.horizontal(|ui| {
+            hex_field(ui, value);
+            if ui.small_button("Default").on_hover_text("Go back to no colour of its own").clicked() {
+                value.clear();
+            }
         });
+        ui.separator();
+        ui.horizontal(|ui| {
+            ui.label(RichText::new("Favourites").small().color(p.muted));
+            if parse_color(value).is_some() && ui.small_button("☆ Add").on_hover_text("Keep this colour for choosing again, on any key").clicked() {
+                add_favorite(favorites, value);
+            }
+        });
+        let mut remove = None;
+        ui.horizontal_wrapped(|ui| {
+            for (index, favorite) in favorites.iter().enumerate() {
+                let fill = parse_color(favorite).unwrap_or(p.raised);
+                let button = ui.add(egui::Button::new("    ").fill(fill)).on_hover_text(format!("{favorite}. Right-click to remove it."));
+                button.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, true, format!("Favourite {favorite}")));
+                if button.clicked() {
+                    value.clone_from(favorite);
+                }
+                if button.secondary_clicked() {
+                    remove = Some(index);
+                }
+            }
+        });
+        if let Some(index) = remove {
+            favorites.remove(index);
+        }
     });
+}
+
+/// For typing a colour in, which only takes effect once it's a whole colour.
+fn hex_field(ui: &mut Ui, value: &mut String) {
+    let id = ui.scope_id().with("hex");
+    let mut text = ui.data(|data| data.get_temp::<String>(id)).unwrap_or_else(|| value.clone());
+    let field = ui.add(egui::TextEdit::singleline(&mut text).id(id).desired_width(80.0).hint_text("#RRGGBB"));
+    if field.changed() && parse_color(&text).is_some() {
+        text.trim().clone_into(value);
+    }
+    // Text left half typed gives way to the colour, once the person has moved on.
+    if field.has_focus() {
+        ui.data_mut(|data| data.insert_temp(id, text));
+    } else {
+        ui.data_mut(|data| data.remove_temp::<String>(id));
+    }
+}
+
+/// Keeps a colour for choosing again, once, however it's written.
+pub fn add_favorite(favorites: &mut Vec<String>, color: &str) {
+    let color = color.trim().to_uppercase();
+    if !favorites.iter().any(|favorite| favorite.eq_ignore_ascii_case(&color)) {
+        favorites.push(color);
+    }
+    let extra = favorites.len().saturating_sub(MAX_FAVORITE_COLORS);
+    favorites.drain(..extra);
 }
 
 /// Draws the right editor for one setting, from the plugin's description of it.
 #[allow(clippy::too_many_arguments)]
-fn field_form(ui: &mut Ui, field: &Field, label: egui::Id, settings: &mut Map<String, Value>, secrets: &[String], step: usize, id: &KeyId, new_secret: &mut Option<SecretTarget>, p: Palette) {
+fn field_form(ui: &mut Ui, field: &Field, label: egui::Id, settings: &mut Map<String, Value>, secrets: &[String], step: usize, id: &KeyId, new_secret: &mut Option<SecretTarget>, favorites: &mut Vec<String>, p: Palette) {
     let key = field.key.as_str();
     let width = 320.0_f32.min(ui.available_width() - 4.0);
     match &field.kind {
@@ -1597,7 +1665,7 @@ fn field_form(ui: &mut Ui, field: &Field, label: egui::Id, settings: &mut Map<St
             }
         }
         FieldKind::KeyValues => key_values_form(ui, key, label, settings, secrets, width),
-        FieldKind::Rules => rules_form(ui, key, label, settings, p),
+        FieldKind::Rules => rules_form(ui, key, label, settings, favorites, p),
     }
 }
 
@@ -1610,7 +1678,7 @@ fn hidden_by_other_field(field: &Field, fields: &[Field], settings: &Map<String,
     settings.get(other).and_then(Value::as_str).or_else(starts_as) == Some(value.as_str())
 }
 
-fn rules_form(ui: &mut Ui, key: &str, label: egui::Id, settings: &mut Map<String, Value>, p: Palette) {
+fn rules_form(ui: &mut Ui, key: &str, label: egui::Id, settings: &mut Map<String, Value>, favorites: &mut Vec<String>, p: Palette) {
     let saved = settings.get(key).cloned().and_then(|rules| serde_json::from_value::<Vec<Rule>>(rules).ok());
     let mut rules = saved.clone().unwrap_or_default();
     let mut remove = None;
@@ -1645,7 +1713,8 @@ fn rules_form(ui: &mut Ui, key: &str, label: egui::Id, settings: &mut Map<String
                             }
                         });
                     });
-                    color_row(ui, &mut rule.color, p);
+                    color_button(ui, "Icon colour", &mut rule.icon_color, favorites, p);
+                    color_button(ui, "Background", &mut rule.color, favorites, p);
                     if ui.small_button("×").on_hover_text("Remove this rule").clicked() {
                         remove = Some(index);
                     }

@@ -15,6 +15,7 @@ pub struct KeyVisual {
     /// Full path of the picture filling the key, if any.
     pub background: String,
     pub color: String,
+    pub icon_color: String,
     pub text_color: String,
 }
 
@@ -406,7 +407,8 @@ mod usb {
             }
         } else if !visual.icon.is_empty() {
             let center = if has_title { 0.4 } else { 0.5 };
-            put_text(&mut image, &symbols, &visual.icon, height as f32 * 0.42, height as f32 * center, text_color);
+            let icon_color = parse(&visual.icon_color, [text_color.0[0], text_color.0[1], text_color.0[2]]);
+            put_text(&mut image, &symbols, &visual.icon, height as f32 * 0.42, height as f32 * center, icon_color);
         }
         if has_title {
             let title: String = visual.title.chars().take(12).collect();
@@ -436,6 +438,7 @@ mod usb {
                 icon: "🔗".into(),
                 background: String::new(),
                 color: "#102030".into(),
+                icon_color: String::new(),
                 text_color: String::new(),
             };
             let image = render_key(&visual, (96, 96));
@@ -457,6 +460,7 @@ mod usb {
                 icon: "🔗".into(),
                 background: path.to_string_lossy().into_owned(),
                 color: "#102030".into(),
+                icon_color: String::new(),
                 text_color: String::new(),
             };
             // An XL key, whose own size is 96 pixels across.
@@ -530,11 +534,30 @@ mod usb {
                 icon: pyroporch_core::engine::SLEEP_ICON.into(),
                 background: String::new(),
                 color: "#101010".into(),
+                icon_color: String::new(),
                 text_color: String::new(),
             };
             let image = render_key(&visual, (96, 96));
             let embers = image.pixels().filter(|p| p.0[0] > 180 && p.0[2] < 90).count();
             assert!(embers > 3, "{embers} ember pixels");
+        }
+
+        #[test]
+        fn an_icon_can_have_a_colour_of_its_own_apart_from_the_title() {
+            let visual = KeyVisual {
+                row: 0,
+                col: 0,
+                title: "Hello".into(),
+                icon: "⚠".into(),
+                background: String::new(),
+                color: "#000000".into(),
+                icon_color: "#FF0000".into(),
+                text_color: "#00FF00".into(),
+            };
+            let image = render_key(&visual, (96, 96));
+            let count = |wanted: fn(&Rgba<u8>) -> bool| image.pixels().filter(|p| wanted(p)).count();
+            assert!(count(|p| p.0[0] > 200 && p.0[1] < 60) > 20, "the icon is red");
+            assert!(count(|p| p.0[1] > 200 && p.0[0] < 60) > 5, "the title is green");
         }
 
         #[test]

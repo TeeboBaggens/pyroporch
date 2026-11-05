@@ -129,7 +129,8 @@ Each rule has these, and the first one that fits wins:
 | `when` | `is`, `is not`, `contains`, `above`, `below` or `anything else`. `above` and `below` compare numbers. `anything else` belongs last, to catch what the others didn't |
 | `value` | What to compare with. Capitals don't count |
 | `icon` | One character or emoji to show, not a file. The key's own if left out |
-| `color` | The colour to show, like `#2E8B57`. The key's own if left out |
+| `icon_color` | The icon's colour, like `#FFFFFF`. The key's own if left out |
+| `color` | The background colour, like `#2E8B57`. The key's own if left out |
 
 The key goes back to its own look when no rule fits, and when a call fails, so an old answer never passes for a
 current one. A picture on the key covers its icon and colour, so a key with rules is best without one.

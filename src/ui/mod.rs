@@ -102,6 +102,7 @@ pub struct VaultForm {
 pub struct LiveLook {
     pub title: Option<String>,
     pub icon: Option<String>,
+    pub icon_color: Option<String>,
     pub color: Option<String>,
 }
 
@@ -109,6 +110,7 @@ pub struct LiveLook {
 pub struct KeyLook {
     pub title: String,
     pub icon: String,
+    pub icon_color: String,
     pub color: String,
 }
 
@@ -473,6 +475,7 @@ impl App {
                     look.title.clone_from(&report.title);
                 }
                 look.icon.clone_from(&report.icon);
+                look.icon_color.clone_from(&report.icon_color);
                 look.color.clone_from(&report.color);
             } else {
                 // What it last found may no longer be true, and a key mustn't go on saying all is well.
@@ -756,13 +759,14 @@ impl App {
             icon: "⬅".into(),
             background: String::new(),
             color: "#3A4252".into(),
+            icon_color: String::new(),
             text_color: String::new(),
         });
         page.keys
             .iter()
             .filter(|key| !self.in_folder() || (key.row, key.col) != BACK_SLOT)
             .map(|key| {
-                let KeyLook { title, icon, color } = self.key_look(key);
+                let KeyLook { title, icon, icon_color, color } = self.key_look(key);
                 hardware::KeyVisual {
                     row: key.row,
                     col: key.col,
@@ -770,6 +774,7 @@ impl App {
                     icon,
                     background: self.background_path(&key.background),
                     color,
+                    icon_color,
                     text_color: key.text_color.clone(),
                 }
             })
@@ -849,7 +854,7 @@ impl App {
     pub fn key_look(&self, key: &Key) -> KeyLook {
         let id = self.key_id(key.row, key.col);
         if self.saver.armed.as_ref().is_some_and(|armed| armed.id == id) {
-            return KeyLook { title: format!("{}: On", key.title), icon: key.icon.clone(), color: key.color.clone() };
+            return KeyLook { title: format!("{}: On", key.title), icon: key.icon.clone(), icon_color: key.icon_color.clone(), color: key.color.clone() };
         }
         let live = self.live_looks.get(&id);
         let (title, color) = if let Some(title) = live.and_then(|live| live.title.as_ref()) {
@@ -864,6 +869,7 @@ impl App {
         KeyLook {
             title: title.clone(),
             icon: live.and_then(|live| live.icon.as_ref()).unwrap_or(&key.icon).clone(),
+            icon_color: live.and_then(|live| live.icon_color.as_ref()).unwrap_or(&key.icon_color).clone(),
             color: live.and_then(|live| live.color.as_ref()).unwrap_or(color).clone(),
         }
     }

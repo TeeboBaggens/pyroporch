@@ -193,8 +193,9 @@ pub struct RunReport {
     pub ok: bool,
     pub message: String,
     pub title: Option<String>,
-    /// An icon and a colour to show on the key until its next run.
+    /// An icon and colours to show on the key until its next run.
     pub icon: Option<String>,
+    pub icon_color: Option<String>,
     pub color: Option<String>,
     /// Every page or profile change, in the order they happened.
     pub navigate: Vec<Navigate>,
@@ -862,6 +863,7 @@ impl Engine {
                     }
                     report.title = outcome.title.or(report.title);
                     report.icon = outcome.icon.or(report.icon);
+                    report.icon_color = outcome.icon_color.or(report.icon_color);
                     report.color = outcome.color.or(report.color);
                     if let Some(navigate) = outcome.navigate {
                         report.navigate.push(navigate.clone());
@@ -919,6 +921,7 @@ impl Engine {
             outcome.deck = None;
         }
         outcome.icon = outcome.icon.filter(|icon| is_live_icon(icon));
+        outcome.icon_color = outcome.icon_color.filter(|color| is_color(color));
         outcome.color = outcome.color.filter(|color| is_color(color));
         Ok(outcome)
     }
@@ -1079,6 +1082,7 @@ mod tests {
         fn run(&self, request: &RunRequest, _: &HostHandle) -> Result<Outcome, String> {
             Ok(Outcome {
                 icon: Some(request.text("icon").into()),
+                icon_color: Some(request.text("color").into()),
                 color: Some(request.text("color").into()),
                 ..Outcome::default()
             })
@@ -1102,6 +1106,8 @@ mod tests {
         }
         for color in ["red", "#12345", "#1234567", "#GGGGGG", ""] {
             assert_eq!(run("x", color).1, None, "{color}");
+            let key = Key { steps: vec![step("test.painter/look", json!({"icon": "x", "color": color}))], ..Key::default() };
+            assert_eq!(engine.run_key(&key, Trigger::Press, "test", true).icon_color, None, "{color}");
         }
     }
 

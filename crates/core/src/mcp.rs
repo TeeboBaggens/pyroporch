@@ -177,6 +177,7 @@ fn tool_list(read_only_mode: bool) -> Vec<Value> {
         map.insert("title".into(), json!({"type": "string"}));
         map.insert("icon".into(), json!({"type": "string", "description": "One character, such as an emoji. builtin:lantern-out is the drawn sleep icon."}));
         map.insert("color".into(), json!({"type": "string", "description": "Background, like #2F6FDB."}));
+        map.insert("icon_color".into(), json!({"type": "string", "description": "Icon colour, like #FFFFFF, for an icon that's a character."}));
         map.insert("text_color".into(), json!({"type": "string", "description": "Title colour, like #FFFFFF."}));
         map.insert("toggle".into(), json!({"type": "boolean", "description": "Flip between two looks when pressed."}));
         map.insert("is_folder".into(), json!({"type": "boolean", "description": "Make this key a folder: a separate screen of keys. A folder has no steps, and setting it again keeps what's inside."}));
@@ -731,6 +732,7 @@ impl McpServer {
             icon: text("icon"),
             background,
             color: color_arg(args, "color")?,
+            icon_color: color_arg(args, "icon_color")?,
             text_color: color_arg(args, "text_color")?,
             toggle: args.get("toggle").and_then(Value::as_bool).unwrap_or(false),
             alt_title: text("alt_title"),
@@ -1048,7 +1050,7 @@ impl McpServer {
                 message = format!("brightness {brightness}%");
             }
         }
-        Ok(json!({"ok": report.ok, "message": message, "title": report.title, "icon": report.icon, "color": report.color}))
+        Ok(json!({"ok": report.ok, "message": message, "title": report.title, "icon": report.icon, "icon_color": report.icon_color, "color": report.color}))
     }
 
     #[cfg(feature = "os-keychain")]
@@ -1648,7 +1650,7 @@ mod tests {
     #[test]
     fn a_colour_the_app_cant_read_is_refused() {
         let (_dir, mut server) = server();
-        for name in ["color", "text_color", "alt_color"] {
+        for name in ["color", "icon_color", "text_color", "alt_color"] {
             let (failed, text) = call(&mut server, "set_key", json!({"row": 2, "col": 0, name: "red", "steps": []}));
             assert!(failed && text.contains(name), "{text}");
         }
