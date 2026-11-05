@@ -12,7 +12,26 @@ independently.
 
 ## Run it
 
-You'll need [Rust](https://rustup.rs). The right version is pinned in `rust-toolchain.toml`, and rustup fetches it
+Ready-made builds are on the [releases page](https://github.com/TeeboBaggens/pyroporch/releases), for
+Linux, Windows and macOS on Intel/AMD (`x86_64`) and Apple Silicon or other ARM (`aarch64`). There's no
+Windows build for ARM.
+
+| System | Download | To start it |
+|---|---|---|
+| macOS | `pyroporch-<version>-macos-<chip>.zip` | Unzip and open `Pyro Porch.app` |
+| Windows | `pyroporch-<version>-windows-x86_64.zip` | Unzip and run `pyroporch.exe` |
+| Linux | `pyroporch-<version>-linux-<chip>.tar.gz` | Unpack and run `pyroporch` |
+
+The builds aren't signed by Apple or Microsoft yet, so the system warns about them the first time:
+
+- **macOS:** open the app, then choose **Open Anyway** under System Settings > Privacy & Security.
+- **Windows:** choose **More info**, then **Run anyway**.
+
+To check a download, compare it with `SHA256SUMS` on the release, or run
+`gh attestation verify <file> --repo TeeboBaggens/pyroporch` to confirm GitHub built it from this repo.
+For an assistant on a Mac, the program to point at is `Pyro Porch.app/Contents/MacOS/pyroporch`.
+
+To build it yourself, you'll need [Rust](https://rustup.rs). The right version is pinned in `rust-toolchain.toml`, and rustup fetches it
 by itself.
 
 ```sh

@@ -1,0 +1,139 @@
+# Builds the app for each platform and, for a version tag, publishes the files as a GitHub release.
+# Changing this file runs everything except the publishing, as a trial on the pull request.
+name: Release
+
+on:
+  push:
+    tags: ['v[0-9]+.[0-9]+.[0-9]+*']
+  pull_request:
+    paths: ['.github/workflows/release.yml']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  # What Info.plist in src/macos.rs promises. Without this an Intel build would aim lower.
+  MACOSX_DEPLOYMENT_TARGET: '11.0'
+
+jobs:
+  version:
+    runs-on: ubuntu-24.04
+    outputs:
+      version: ${{ steps.read.outputs.version }}
+    steps:
+      # Pinned by commit, as this workflow publishes what users run. These are the latest stable
+      # releases, checked 2026-11-05: checkout 7.0.1, upload-artifact 7.0.2, download-artifact 8.0.2,
+      # attest-build-provenance 4.2.2.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - id: read
+        name: Read the version, and check a tag matches it
+        env:
+          TAG: ${{ github.ref_type == 'tag' && github.ref_name || '' }}
+        run: |
+          version=$(sed -n 's/^version = "\(.*\)"$/\1/p' Cargo.toml | head -n 1)
+          if [ -n "$TAG" ] && [ "$TAG" != "v$version" ]; then
+            echo "::error::The tag is $TAG, but Cargo.toml says $version."
+            exit 1
+          fi
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+
+  build:
+    needs: version
+    strategy:
+      matrix:
+        include:
+          # Linux programs only run on systems at least as new as the one that built them, so this
+          # is the oldest LTS GitHub offers rather than the latest.
+          - { os: ubuntu-22.04, name: linux-x86_64 }
+          - { os: ubuntu-22.04-arm, name: linux-aarch64 }
+          - { os: windows-2025, name: windows-x86_64 }
+          - { os: macos-26, name: macos-aarch64 }
+          - { os: macos-26-intel, name: macos-x86_64 }
+    runs-on: ${{ matrix.os }}
+    env:
+      PACKAGE: pyroporch-${{ needs.version.outputs.version }}-${{ matrix.name }}
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install the system's development packages
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y libudev-dev libxkbcommon-dev libx11-dev libwayland-dev libgl1-mesa-dev
+      - name: Install the pinned Rust
+        run: rustup toolchain install
+      # No build cache here: what gets published is built from nothing but the tagged code.
+      - run: cargo test --workspace --locked
+      - run: cargo build --release --locked
+      - name: Gather the files
+        run: |
+          mkdir "$PACKAGE"
+          cp README.md LICENSE-APACHE LICENSE-MIT "$PACKAGE/"
+          case "$RUNNER_OS" in
+            macOS) target/release/pyroporch --make-bundle "$PACKAGE" && rm "$PACKAGE/Pyro Porch.stamp" ;;
+            Windows) cp target/release/pyroporch.exe "$PACKAGE/" ;;
+            *) cp target/release/pyroporch "$PACKAGE/" ;;
+          esac
+      - name: Check the packaged program starts
+        run: |
+          case "$RUNNER_OS" in
+            macOS)
+              codesign --verify --deep --strict "$PACKAGE/Pyro Porch.app"
+              "$PACKAGE/Pyro Porch.app/Contents/MacOS/pyroporch" --version
+              ;;
+            Windows) "$PACKAGE/pyroporch.exe" --version ;;
+            *) "$PACKAGE/pyroporch" --version ;;
+          esac
+      - name: Pack the files
+        run: |
+          mkdir dist
+          case "$RUNNER_OS" in
+            # ditto keeps the app's signature and symlinks, which plain zip tools can break.
+            macOS) ditto -c -k --keepParent "$PACKAGE" "dist/$PACKAGE.zip" ;;
+            Windows) 7z a "dist/$PACKAGE.zip" "$PACKAGE" ;;
+            *) tar -czf "dist/$PACKAGE.tar.gz" "$PACKAGE" ;;
+          esac
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: ${{ env.PACKAGE }}
+          path: dist/*
+          if-no-files-found: error
+
+  publish:
+    if: github.event_name == 'push'
+    needs: [version, build]
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+      # For the signed record of where the files were built.
+      attestations: write
+      id-token: write
+    steps:
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          path: dist
+          merge-multiple: true
+      - name: Write the checksums
+        working-directory: dist
+        run: sha256sum -- * > SHA256SUMS
+      - uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-path: dist/*
+      - name: Publish the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          TAG: ${{ github.ref_name }}
+          VERSION: ${{ needs.version.outputs.version }}
+        run: |
+          # A version like 1.2.0-rc.1 is marked as a pre-release.
+          case "$VERSION" in
+            *-*) prerelease=--prerelease ;;
+            *) prerelease= ;;
+          esac
+          gh release create "$TAG" dist/* --verify-tag --generate-notes --title "Pyro Porch $VERSION" $prerelease

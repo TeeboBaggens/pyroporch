@@ -5,6 +5,7 @@
 //! `pyroporch mcp`                     runs the built-in MCP server for an AI assistant
 //! `pyroporch --screenshot <file.png>` draws 120 frames, saves a picture and exits
 //! `pyroporch --quit`                  closes a copy running in the background
+//! `pyroporch --make-bundle <folder>`  on a Mac, makes `Pyro Porch.app` there, for the release builds
 
 // No console window on Windows. Pipes to the MCP server still work without one.
 #![cfg_attr(all(windows, not(debug_assertions)), windows_subsystem = "windows")]
@@ -169,6 +170,11 @@ fn main() {
         Some("--screenshot") => match args.get(1) {
             Some(path) => run_app(Some(PathBuf::from(path)), view),
             None => Err("--screenshot needs a file name".into()),
+        },
+        #[cfg(target_os = "macos")]
+        Some("--make-bundle") => match args.get(1) {
+            Some(folder) => macos::make_bundle(std::path::Path::new(folder)),
+            None => Err("--make-bundle needs a folder".into()),
         },
         Some("--version") => {
             println!("pyroporch {}", env!("CARGO_PKG_VERSION"));
