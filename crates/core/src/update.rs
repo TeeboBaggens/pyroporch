@@ -19,7 +19,7 @@ pub const RELEASES_PAGE: &str = "https://github.com/TeeboBaggens/pyroporch/relea
 pub const CHECK_EVERY_SECONDS: u64 = 6 * 60 * 60;
 /// The public half of the release key. The release workflow refuses to publish with a key that
 /// doesn't match this.
-const SIGNING_KEY_HEX: &str = "0000000000000000000000000000000000000000000000000000000000000000";
+const SIGNING_KEY_HEX: &str = "3c348e6c10788c868fd95e5152470c2622bca34e785ac40f9f918477bac1a555";
 const SUMS_FILE: &str = "SHA256SUMS";
 const SIGNATURE_FILE: &str = "SHA256SUMS.sig";
 /// Far bigger than a package is, so a bad answer can't fill the disk.
