@@ -195,6 +195,8 @@ pub fn parse_combo(combo: &str) -> Result<Vec<Key>, String> {
                 "numlock" => Key::Numlock,
                 #[cfg(not(any(target_os = "macos", target_os = "windows")))]
                 "scrolllock" => Key::ScrollLock,
+                #[cfg(target_os = "windows")]
+                "scrolllock" => Key::Scroll,
                 single if single.chars().count() == 1 => Key::Unicode(single.chars().next().unwrap_or(' ')),
                 other => return Err(format!("unknown key: {other}")),
             })

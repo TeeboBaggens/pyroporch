@@ -43,6 +43,8 @@ jobs:
   build:
     needs: version
     strategy:
+      # Let every platform finish, to see all that's wrong at once. Publishing still needs them all.
+      fail-fast: false
       matrix:
         include:
           # Linux programs only run on systems at least as new as the one that built them, so this

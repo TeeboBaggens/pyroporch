@@ -19,6 +19,7 @@ const ASH_DARK: Rgb = [0.47, 0.46, 0.46];
 const EMBER: Rgb = [0.96, 0.42, 0.10];
 const FIRELIGHT: Rgb = [1.0, 0.62, 0.22];
 const LANTERN_METAL: Rgb = [0.47, 0.36, 0.30];
+#[cfg_attr(target_os = "linux", allow(dead_code))]
 const MARK_COLOR: Rgb = [0.80, 0.50, 0.27];
 
 fn mix(a: Rgb, b: Rgb, t: f32) -> Rgb {
@@ -203,6 +204,7 @@ fn lantern(x: f32, y: f32, lit: bool) -> Color {
 }
 
 /// A simpler lantern for the menu bar, where it's tiny and may be a single flat colour.
+#[cfg_attr(target_os = "linux", allow(dead_code))]
 fn lantern_mark(x: f32, y: f32) -> Color {
     let mut color = CLEAR;
     flame(&mut color, x, y, 0.83, 0.33, 0.36);
@@ -253,6 +255,7 @@ pub fn named(name: &str, size: u32) -> Option<RgbaImage> {
 }
 
 /// The lantern alone, for the menu bar, where a full square icon looks out of place.
+#[cfg_attr(target_os = "linux", allow(dead_code))]
 pub fn render_mark(size: u32) -> RgbaImage {
     render_with(size, lantern_mark)
 }
@@ -279,6 +282,7 @@ pub fn open_capped(path: &str) -> Option<RgbaImage> {
 }
 
 /// The lantern in one flat colour, keeping its shape.
+#[cfg_attr(target_os = "linux", allow(dead_code))]
 pub fn render_mark_tinted(size: u32, shade: u8) -> RgbaImage {
     let mut image = render_mark(size);
     for pixel in image.pixels_mut() {

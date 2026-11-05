@@ -3,6 +3,8 @@
 //! Linux has no tray here: it would need all of GTK. Starting the app again brings its window back,
 //! and `pyroporch --quit` closes it.
 
+// Linux has no tray to send these.
+#[cfg_attr(target_os = "linux", allow(dead_code))]
 pub enum Request {
     Show,
     Quit,
