@@ -4,12 +4,6 @@ A lean button deck: a grid of keys that open things, press hotkeys, call APIs an
 on screen and with a USB deck, and keeps running in the background. Written in Rust, for macOS,
 Windows and Linux. The name is a play on a deck by a stream: a porch, with a fire.
 
-## Status
-
-Built and tested on macOS. It has loaded on a real USB deck, but not every deck feature has been tried on one. The Windows and Linux builds haven't been run yet: the
-automatic checks in `.github/workflows` will try them once this is on GitHub. Nobody has reviewed its security
-independently.
-
 ## Run it
 
 Ready-made builds are on the [releases page](https://github.com/TeeboBaggens/pyroporch/releases), for
@@ -109,8 +103,9 @@ its quick start in the sandbox, and check the guides against what the program re
 
 ## USB decks
 
-Close the deck maker's own app first, because only one program can hold the device. On Linux you
-may need a udev rule to reach the device without root; the `elgato-streamdeck` crate's README has one.
+If you're running the original application, you will need to close it as only one program can occupy the device
+at a time. On Linux you may need a udev rule to reach the device without root; the `elgato-streamdeck` crate's
+README has one.
 
 ## License
 
