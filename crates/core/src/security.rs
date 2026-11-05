@@ -5,6 +5,7 @@ use pyroporch_sdk::{ActionSpec, FieldKind};
 use serde_json::{Map, Value};
 use sha2::{Digest, Sha256};
 use std::ops::Range;
+use zeroize::Zeroizing;
 
 use crate::config::Step;
 
@@ -129,11 +130,29 @@ fn check_url(field: &str, text: &str, findings: &mut Vec<String>) {
         if let Some((name, value)) = pair.split_once('=')
             && sensitive_name(name)
             && !value.is_empty()
-            && find_refs(value).is_empty()
+            && !outside_refs(value).trim().is_empty()
         {
             findings.push(format!("{field}: the address carries \"{name}\" in plain text; use the vault"));
         }
     }
+}
+
+/// What's written around the placeholders in a piece of text.
+fn outside_refs(text: &str) -> String {
+    let mut out = String::new();
+    let mut at = 0;
+    for reference in find_refs(text) {
+        out.push_str(&text[at..reference.range.start]);
+        at = reference.range.end;
+    }
+    out.push_str(&text[at..]);
+    out
+}
+
+/// The word that goes in front of a credential in an `Authorization` header, or nothing.
+fn is_auth_scheme(text: &str) -> bool {
+    let word = text.trim().to_lowercase();
+    ["", "bearer", "basic", "token", "digest", "apikey"].contains(&word.as_str())
 }
 
 fn check_value(path: &str, name: &str, value: &Value, findings: &mut Vec<String>) {
@@ -142,10 +161,20 @@ fn check_value(path: &str, name: &str, value: &Value, findings: &mut Vec<String>
             if text.is_empty() {
                 return;
             }
-            let unreferenced = find_refs(text).is_empty();
-            if unreferenced && (sensitive_name(name) || looks_like_credential(text)) {
+            let plain = if find_refs(text).is_empty() {
+                sensitive_name(name) || looks_like_credential(text)
+            } else {
+                // A placeholder doesn't excuse what's written next to it.
+                let outside = outside_refs(text);
+                (sensitive_name(name) && !is_auth_scheme(&outside))
+                    || outside.split_whitespace().any(looks_like_credential)
+            };
+            if plain {
                 findings.push(format!("{path}: looks like a credential in plain text; use the vault"));
             }
+        }
+        Value::Number(_) if sensitive_name(name) => {
+            findings.push(format!("{path}: looks like a credential in plain text; use the vault"));
         }
         Value::Object(map) => {
             for (key, inner) in map {
@@ -181,16 +210,21 @@ pub fn plaintext_findings(spec: Option<&ActionSpec>, settings: &Map<String, Valu
             .map(|f| &f.kind);
         match kind {
             Some(FieldKind::Secret) => {
-                let text = value.as_str().unwrap_or("");
                 // A secret field holds a reference to a secret in the vault, not a basic
                 // credential: the two are filled in differently.
-                if !text.is_empty() && pyroporch_sdk::secret_name(text).is_none() {
+                let fine = match value {
+                    Value::Null => true,
+                    Value::String(text) => text.is_empty() || pyroporch_sdk::secret_name(text).is_some(),
+                    _ => false,
+                };
+                if !fine {
                     findings.push(format!("{key}: this field only accepts a secret from the vault"));
                 }
             }
-            Some(FieldKind::Url | FieldKind::RequestUrl) => {
-                check_url(key, value.as_str().unwrap_or(""), &mut findings);
-            }
+            Some(FieldKind::Url | FieldKind::RequestUrl) => match value.as_str() {
+                Some(url) => check_url(key, url, &mut findings),
+                None => check_value(key, key, value, &mut findings),
+            },
             _ => check_value(key, key, value, &mut findings),
         }
     }
@@ -219,11 +253,17 @@ pub fn sha256_hex(bytes: &[u8]) -> String {
 
 /// Replaces any copy of a secret, plain or base64, so it can't leak through an answer or a log.
 pub fn scrub(text: &str, secrets: &[String]) -> String {
-    let mut out = text.to_string();
+    let mut copies: Vec<Zeroizing<String>> = Vec::new();
     for secret in secrets.iter().filter(|s| !s.is_empty()) {
-        out = out.replace(secret.as_str(), "•••");
-        let encoded = base64::engine::general_purpose::STANDARD.encode(secret);
-        out = out.replace(&encoded, "•••");
+        copies.push(Zeroizing::new(secret.clone()));
+        copies.push(Zeroizing::new(base64::engine::general_purpose::STANDARD.encode(secret)));
+        copies.push(Zeroizing::new(url::form_urlencoded::byte_serialize(secret.as_bytes()).collect()));
+    }
+    // Longest first: one secret can be the start of another, which must go whole.
+    copies.sort_by_key(|copy| std::cmp::Reverse(copy.len()));
+    let mut out = text.to_string();
+    for copy in &copies {
+        out = out.replace(copy.as_str(), "•••");
     }
     out
 }
@@ -268,6 +308,22 @@ mod tests {
                 Field::new("note", "n", FieldKind::Text),
             ],
         }
+    }
+
+    #[test]
+    fn a_placeholder_or_another_type_does_not_excuse_a_credential() {
+        let plain = |settings: serde_json::Value| !plaintext_findings(Some(&spec()), settings.as_object().unwrap()).is_empty();
+        assert!(plain(serde_json::json!({"password": 12345678})));
+        assert!(plain(serde_json::json!({"password": "hunter2{{secret:x}}"})));
+        assert!(plain(serde_json::json!({"Authorization": "Bearer ghp_abcdefghijklmnopqrstuvwxyz0123456789 {{secret:x}}"})));
+        assert!(!plain(serde_json::json!({"Authorization": "Bearer {{secret:x}}"})));
+        assert!(!plain(serde_json::json!({"password": "{{secret:x}}"})));
+    }
+
+    #[test]
+    fn overlapping_secrets_are_blanked_whole() {
+        let secrets = ["abc123".to_string(), "abc123def456".to_string()];
+        assert_eq!(scrub("got abc123def456.", &secrets), "got •••.");
     }
 
     #[test]

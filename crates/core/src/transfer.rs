@@ -81,7 +81,7 @@ pub fn export(ws: &Workspace, engine: &Engine, only: Option<&str>) -> Result<Str
         }
         None => {
             bundle.profiles = ws.profiles.clone();
-            bundle.presets = ws.settings.presets.clone();
+            bundle.presets = ws.settings.presets.iter().filter(|preset| !preset_holds_credential(engine, preset)).cloned().collect();
             bundle.ui = Some(ws.settings.ui.clone());
         }
     }
@@ -116,7 +116,7 @@ pub fn export(ws: &Workspace, engine: &Engine, only: Option<&str>) -> Result<Str
         }
     }
     for name in names {
-        if let Some(bytes) = ws.paths.image(&name).and_then(|path| std::fs::read(path).ok()) {
+        if let Some(bytes) = ws.paths.image(&name).filter(|path| path.is_file()).and_then(|path| std::fs::read(path).ok()) {
             bundle.images.insert(name, B64.encode(bytes));
         }
     }
@@ -130,6 +130,17 @@ fn holds_credential(engine: &Engine, key: &Key) -> bool {
         engine.check_step(step).iter().any(|block| matches!(block, Block::PlainCredential(_)))
             || !plaintext_findings(None, &step.settings).is_empty()
     })
+}
+
+/// The same for a preset, which goes through the same checks as a key's step.
+fn preset_holds_credential(engine: &Engine, preset: &crate::config::Preset) -> bool {
+    let step = crate::config::Step {
+        action: preset.action.clone(),
+        settings: preset.settings.clone(),
+        delay_ms: 0,
+    };
+    engine.check_step(&step).iter().any(|block| matches!(block, Block::PlainCredential(_)))
+        || !plaintext_findings(None, &step.settings).is_empty()
 }
 
 /// Reads an export file and checks it's one, without changing anything.
@@ -220,18 +231,22 @@ pub fn apply(ws: &mut Workspace, engine: &Engine, mut bundle: Bundle, use_appear
     }
 
     for preset in std::mem::take(&mut bundle.presets) {
-        let step = crate::config::Step {
-            action: preset.action.clone(),
-            settings: preset.settings.clone(),
-            delay_ms: 0,
-        };
-        let plain = engine.check_step(&step).iter().any(|block| matches!(block, Block::PlainCredential(_)))
-            || !plaintext_findings(None, &step.settings).is_empty();
-        if plain {
+        if preset_holds_credential(engine, &preset) {
             report.removed_keys += 1;
             continue;
         }
-        ws.settings.presets.retain(|existing| existing.name != preset.name);
+        // Like a profile, one with the same name arrives alongside it, unless it's the same one.
+        let same = |existing: &crate::config::Preset| existing.name == preset.name && existing.action == preset.action && existing.settings == preset.settings;
+        if ws.settings.presets.iter().any(same) {
+            continue;
+        }
+        let mut preset = preset;
+        let base = preset.name.clone();
+        let mut n = 2;
+        while ws.settings.presets.iter().any(|existing| existing.name == preset.name) {
+            preset.name = format!("{base} ({n})");
+            n += 1;
+        }
         ws.settings.presets.push(preset);
         report.presets += 1;
     }
@@ -385,6 +400,38 @@ mod tests {
         assert!(text.contains("{{secret:svc_key}}"));
         let bundle = read(&text).unwrap();
         bundle.profiles.values().next().unwrap().pages[0].for_each_key(&mut |key| assert!(key.approved.is_empty()));
+    }
+
+    #[test]
+    fn an_import_never_replaces_a_preset_of_the_same_name() {
+        let (_dir, mut ws, engine) = setup();
+        let preset = |url: &str| {
+            let mut settings = serde_json::Map::new();
+            settings.insert("url".into(), json!(url));
+            crate::config::Preset { name: "Mine".into(), action: "test.fake/call".into(), settings, ..Default::default() }
+        };
+        ws.settings.presets.push(preset("https://a.example/"));
+        let bundle = Bundle { format: FORMAT.into(), version: VERSION, presets: vec![preset("https://b.example/"), preset("https://a.example/")], ..Bundle::default() };
+        apply(&mut ws, &engine, bundle, false).unwrap();
+        let names: Vec<&str> = ws.settings.presets.iter().map(|p| p.name.as_str()).collect();
+        assert_eq!(names, vec!["Mine", "Mine (2)"]);
+        assert_eq!(ws.settings.presets[0].settings["url"], "https://a.example/");
+    }
+
+    #[test]
+    fn a_preset_with_a_plain_credential_stays_out_of_the_export() {
+        let (_dir, mut ws, engine) = setup();
+        let mut settings = serde_json::Map::new();
+        settings.insert("password".into(), json!("hunter2"));
+        ws.settings.presets.push(crate::config::Preset {
+            name: "Leaky".into(),
+            action: "test.fake/call".into(),
+            settings,
+            ..Default::default()
+        });
+        let text = export(&ws, &engine, None).unwrap();
+        assert!(!text.contains("hunter2"), "{text}");
+        assert!(!text.contains("Leaky"), "{text}");
     }
 
     #[test]

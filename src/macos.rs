@@ -43,7 +43,9 @@ fn prepare(bundle: &Path, exe: &Path) -> Result<(), String> {
     // Kept outside the bundle: a stray file inside would fail the signature check.
     let stamp_path = bundle.with_extension("stamp");
     let stamp = env!("PYROPORCH_BUILD");
-    if std::fs::read_to_string(&stamp_path).is_ok_and(|found| found == stamp) {
+    // The stamp sits outside the bundle, so it says nothing if the bundle has been moved away.
+    let in_place = contents.join("MacOS").join(PROGRAM).is_file();
+    if in_place && std::fs::read_to_string(&stamp_path).is_ok_and(|found| found == stamp) {
         return Ok(());
     }
     let (macos, resources) = (contents.join("MacOS"), contents.join("Resources"));

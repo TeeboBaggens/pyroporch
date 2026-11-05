@@ -10,6 +10,8 @@ default = []
 os-keychain = ["dep:keyring"]
 
 [dependencies]
+# chrono 0.4.45: latest stable (no LTS track), checked 2026-11-04. For the local date in autosave names.
+chrono = { version = "0.4.45", default-features = false, features = ["clock"] }
 pyroporch-sdk.workspace = true
 serde.workspace = true
 serde_json.workspace = true

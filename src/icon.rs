@@ -264,6 +264,10 @@ const MAX_ALLOC: u64 = 128 * 1024 * 1024;
 /// Reads a picture named in a key's settings, with limits: a huge or malformed file must not
 /// be able to take the app down. Returns a copy small enough to draw.
 pub fn open_capped(path: &str) -> Option<RgbaImage> {
+    // Opening a pipe could wait forever, and this runs while the window is being drawn.
+    if !std::path::Path::new(path).is_file() {
+        return None;
+    }
     let mut reader = image::ImageReader::open(path).ok()?.with_guessed_format().ok()?;
     let mut limits = image::Limits::default();
     limits.max_image_width = Some(MAX_SIDE);

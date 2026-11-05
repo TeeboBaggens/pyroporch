@@ -376,13 +376,19 @@ mod usb {
         let label: Vec<FontRef<'_>> = [ubuntu.clone(), noto.clone()].into_iter().flatten().collect();
         let symbols: Vec<FontRef<'_>> = [noto, icons, ubuntu].into_iter().flatten().collect();
         let has_title = !visual.title.is_empty();
-        let on_picture = match image::open(&visual.background) {
-            Ok(picture) => {
+        // Opening a pipe could wait forever, so only a plain file is tried.
+        let picture = if std::path::Path::new(&visual.background).is_file() {
+            image::open(&visual.background).ok()
+        } else {
+            None
+        };
+        let on_picture = match picture {
+            Some(picture) => {
                 let picture = picture.resize_exact(width, height, imageops::FilterType::Triangle).to_rgba8();
                 imageops::overlay(&mut image, &picture, 0, 0);
                 true
             }
-            Err(_) => false,
+            None => false,
         };
         let looks_like_path = visual.icon.contains(['/', '\\', '.']);
         if on_picture {

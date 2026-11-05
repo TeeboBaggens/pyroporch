@@ -546,6 +546,7 @@ Asking for less is better for everyone: the person sees this list when deciding 
 | Plugin file | 32 MiB |
 | Memory | 64 MiB |
 | Work per call to `run()` or `paint()` | About 5 billion instructions. Going over stops the call |
+| Time for one `run()` to go on calling the app | 5 minutes. After that its next call stops it |
 | One message between the plugin and the app | 8 MiB |
 | One answer from a site | 1 MiB |
 | One web request | 60 seconds |

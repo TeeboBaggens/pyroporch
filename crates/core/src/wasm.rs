@@ -4,18 +4,28 @@
 
 use pyroporch_sdk::{ABI_VERSION, HostCall, HostHandle, Outcome, PaintRequest, Plugin, PluginInfo, RunRequest};
 use std::sync::Mutex;
+use std::time::{Duration, Instant};
 use wasmi::{Caller, Config, Engine, Extern, Instance, Linker, Memory, Module, Store, StoreLimits, StoreLimitsBuilder, TypedFunc};
 
 pub const MAX_WASM_BYTES: usize = 32 * 1024 * 1024;
 const MAX_MEMORY_BYTES: usize = 64 * 1024 * 1024;
 const MAX_MESSAGE_BYTES: usize = 8 * 1024 * 1024;
+/// Far more than a real plugin's function table holds, and small enough not to matter.
+const MAX_TABLE_ELEMENTS: usize = 100_000;
 /// Roughly how many instructions one run may use, so a stuck plugin can't hold a key forever.
 /// This is the limit the plugin guide publishes, so it is the one plugins are written against.
 pub const FUEL_PER_CALL: u64 = 5_000_000_000;
+/// How long one run may go on calling the app. Waiting for an answer uses no instructions, so
+/// the limit above doesn't cover it.
+const MAX_RUN_TIME: Duration = Duration::from_secs(300);
 
 struct State {
     limits: StoreLimits,
     host: Option<HostHandle>,
+    /// The plugin's own code is setting aside space for an answer from the app.
+    answering: bool,
+    /// When the current run has to stop calling the app.
+    deadline: Option<Instant>,
 }
 
 struct Sandbox {
@@ -31,6 +41,8 @@ struct Sandbox {
 pub struct WasmPlugin {
     info: PluginInfo,
     fuel: u64,
+    /// The file it was loaded from, to start it again after it stops.
+    bytes: Vec<u8>,
     sandbox: Mutex<Sandbox>,
 }
 
@@ -67,6 +79,14 @@ fn handle_call(host: Option<&HostHandle>, bytes: &[u8]) -> Result<serde_json::Va
 /// Runs a call from the plugin, and puts the JSON reply into the plugin's own memory.
 fn host_call(mut caller: Caller<'_, State>, ptr: u32, len: u32) -> Result<u64, wasmi::Error> {
     let trap = |text: &str| wasmi::Error::new(text.to_string());
+    // Handing over an answer runs the plugin's ld_alloc. If that could call here again, each level
+    // would use up the app's own stack, which no limit on the plugin covers.
+    if caller.data().answering {
+        return Err(trap("the plugin called the app while being handed an answer"));
+    }
+    if caller.data().deadline.is_some_and(|deadline| Instant::now() >= deadline) {
+        return Err(trap("the plugin ran for too long"));
+    }
     let Some(Extern::Memory(memory)) = caller.get_export("memory") else {
         return Err(trap("the plugin has no memory"));
     };
@@ -78,7 +98,10 @@ fn host_call(mut caller: Caller<'_, State>, ptr: u32, len: u32) -> Result<u64, w
         return Err(trap("the plugin has no ld_alloc"));
     };
     let alloc = alloc.typed::<u32, u32>(&caller)?;
-    let at = alloc.call(&mut caller, reply.len() as u32)?;
+    caller.data_mut().answering = true;
+    let at = alloc.call(&mut caller, reply.len() as u32);
+    caller.data_mut().answering = false;
+    let at = at?;
     memory
         .write(&mut caller, at as usize, &reply)
         .map_err(|_| trap("the plugin's memory is too small"))?;
@@ -95,57 +118,82 @@ impl WasmPlugin {
         if bytes.len() > MAX_WASM_BYTES {
             return Err("the plugin file is too big".into());
         }
-        let mut config = Config::default();
-        config.consume_fuel(true);
-        let engine = Engine::new(&config);
-        let module = Module::new(&engine, bytes).map_err(|e| format!("not a valid plugin: {e}"))?;
-        let limits = StoreLimitsBuilder::new().memory_size(MAX_MEMORY_BYTES).build();
-        let mut store = Store::new(&engine, State { limits, host: None });
-        store.limiter(|state| &mut state.limits);
-        store.set_fuel(fuel).map_err(|e| e.to_string())?;
-
-        let mut linker = Linker::<State>::new(&engine);
-        linker
-            .func_wrap("pyroporch", "host_call", host_call)
-            .map_err(|e| e.to_string())?;
-        let instance: Instance = linker
-            .instantiate_and_start(&mut store, &module)
-            .map_err(|e| format!("the plugin asks for something the sandbox doesn't offer: {e}"))?;
-
-        let abi = instance
-            .get_typed_func::<(), u32>(&store, "ld_abi")
-            .map_err(|_| "this file isn't a Pyro Porch plugin".to_string())?
-            .call(&mut store, ())
-            .map_err(|e| e.to_string())?;
-        if abi != ABI_VERSION {
-            return Err(format!("the plugin needs plugin system version {abi}; this app has {ABI_VERSION}"));
-        }
-        let func = "the plugin is missing a required function";
-        let memory = instance.get_memory(&store, "memory").ok_or("the plugin has no memory")?;
-        let alloc = instance.get_typed_func(&store, "ld_alloc").map_err(|_| func)?;
-        let free = instance.get_typed_func(&store, "ld_free").map_err(|_| func)?;
-        let run = instance.get_typed_func(&store, "ld_run").map_err(|_| func)?;
-        let info_fn = instance.get_typed_func::<(), u64>(&store, "ld_info").map_err(|_| func)?;
-        let paint = instance.get_typed_func(&store, "ld_paint").ok();
-
-        let mut sandbox = Sandbox {
-            store,
-            memory,
-            alloc,
-            free,
-            run,
-            paint,
-        };
-        let packed = info_fn.call(&mut sandbox.store, ()).map_err(|e| e.to_string())?;
-        let bytes = sandbox.take_output(packed)?;
-        let info: PluginInfo =
-            serde_json::from_slice(&bytes).map_err(|e| format!("the plugin described itself badly: {e}"))?;
+        let (sandbox, info) = start(bytes, fuel)?;
         Ok(Self {
             info,
             fuel,
+            bytes: bytes.to_vec(),
             sandbox: Mutex::new(sandbox),
         })
     }
+
+    /// After a plugin stops partway, its memory is in whatever state it was left in. It's started
+    /// again from the file, so the next call doesn't run on that.
+    fn start_again_if_stopped(&self, sandbox: &mut Sandbox, output: Result<Vec<u8>, String>) -> Result<Vec<u8>, String> {
+        if output.is_err()
+            && let Ok((fresh, _)) = start(&self.bytes, self.fuel)
+        {
+            *sandbox = fresh;
+        }
+        output
+    }
+}
+
+/// Compiles and starts a plugin. Nothing it does here can reach anything: no host is attached.
+fn start(bytes: &[u8], fuel: u64) -> Result<(Sandbox, PluginInfo), String> {
+    let mut config = Config::default();
+    config.consume_fuel(true);
+    // The memory limit is for each memory, so a plugin only gets the one.
+    config.wasm_multi_memory(false);
+    let engine = Engine::new(&config);
+    let module = Module::new(&engine, bytes).map_err(|e| format!("not a valid plugin: {e}"))?;
+    let limits = StoreLimitsBuilder::new()
+        .memory_size(MAX_MEMORY_BYTES)
+        .memories(1)
+        .tables(1)
+        .table_elements(MAX_TABLE_ELEMENTS)
+        .build();
+    let mut store = Store::new(&engine, State { limits, host: None, answering: false, deadline: None });
+    store.limiter(|state| &mut state.limits);
+    store.set_fuel(fuel).map_err(|e| e.to_string())?;
+
+    let mut linker = Linker::<State>::new(&engine);
+    linker
+        .func_wrap("pyroporch", "host_call", host_call)
+        .map_err(|e| e.to_string())?;
+    let instance: Instance = linker
+        .instantiate_and_start(&mut store, &module)
+        .map_err(|e| format!("the plugin asks for something the sandbox doesn't offer: {e}"))?;
+
+    let abi = instance
+        .get_typed_func::<(), u32>(&store, "ld_abi")
+        .map_err(|_| "this file isn't a Pyro Porch plugin".to_string())?
+        .call(&mut store, ())
+        .map_err(|e| e.to_string())?;
+    if abi != ABI_VERSION {
+        return Err(format!("the plugin needs plugin system version {abi}; this app has {ABI_VERSION}"));
+    }
+    let func = "the plugin is missing a required function";
+    let memory = instance.get_memory(&store, "memory").ok_or("the plugin has no memory")?;
+    let alloc = instance.get_typed_func(&store, "ld_alloc").map_err(|_| func)?;
+    let free = instance.get_typed_func(&store, "ld_free").map_err(|_| func)?;
+    let run = instance.get_typed_func(&store, "ld_run").map_err(|_| func)?;
+    let info_fn = instance.get_typed_func::<(), u64>(&store, "ld_info").map_err(|_| func)?;
+    let paint = instance.get_typed_func(&store, "ld_paint").ok();
+
+    let mut sandbox = Sandbox {
+        store,
+        memory,
+        alloc,
+        free,
+        run,
+        paint,
+    };
+    let packed = info_fn.call(&mut sandbox.store, ()).map_err(|e| e.to_string())?;
+    let bytes = sandbox.take_output(packed)?;
+    let info: PluginInfo =
+        serde_json::from_slice(&bytes).map_err(|e| format!("the plugin described itself badly: {e}"))?;
+    Ok((sandbox, info))
 }
 
 impl Sandbox {
@@ -181,16 +229,8 @@ impl Plugin for WasmPlugin {
     fn run(&self, request: &RunRequest, host: &HostHandle) -> Result<Outcome, String> {
         let mut sandbox = self.sandbox.lock().map_err(|_| "the plugin stopped working")?;
         let sandbox = &mut *sandbox;
-        sandbox.store.set_fuel(self.fuel).map_err(|e| e.to_string())?;
-        let input = serde_json::to_vec(request).map_err(|e| e.to_string())?;
-        let at = sandbox.hand_over(&input)?;
-
-        sandbox.store.data_mut().host = Some(host.clone());
-        let packed = sandbox.run.call(&mut sandbox.store, (at, input.len() as u32));
-        sandbox.store.data_mut().host = None;
-        let packed = packed.map_err(|e| format!("the plugin stopped: {e}"))?;
-
-        let bytes = sandbox.take_output(packed)?;
+        let output = sandbox.run_action(self.fuel, request, host);
+        let bytes = self.start_again_if_stopped(sandbox, output)?;
         serde_json::from_slice::<Result<Outcome, String>>(&bytes)
             .map_err(|e| format!("the plugin answered badly: {e}"))?
     }
@@ -199,14 +239,38 @@ impl Plugin for WasmPlugin {
     fn paint(&self, request: &PaintRequest) -> Result<Vec<u8>, String> {
         let mut sandbox = self.sandbox.lock().map_err(|_| "the plugin stopped working")?;
         let sandbox = &mut *sandbox;
-        let paint = sandbox.paint.ok_or("this plugin doesn't draw")?;
-        // A frame gets the same limit as a run, as the plugin guide says.
-        sandbox.store.set_fuel(self.fuel).map_err(|e| e.to_string())?;
+        if sandbox.paint.is_none() {
+            return Err("this plugin doesn't draw".into());
+        }
+        let output = sandbox.draw(self.fuel, request);
+        self.start_again_if_stopped(sandbox, output)
+    }
+}
+
+impl Sandbox {
+    fn run_action(&mut self, fuel: u64, request: &RunRequest, host: &HostHandle) -> Result<Vec<u8>, String> {
+        self.store.set_fuel(fuel).map_err(|e| e.to_string())?;
         let input = serde_json::to_vec(request).map_err(|e| e.to_string())?;
-        let at = sandbox.hand_over(&input)?;
+        let at = self.hand_over(&input)?;
+
+        self.store.data_mut().host = Some(host.clone());
+        self.store.data_mut().deadline = Some(Instant::now() + MAX_RUN_TIME);
+        let packed = self.run.call(&mut self.store, (at, input.len() as u32));
+        self.store.data_mut().host = None;
+        self.store.data_mut().deadline = None;
+        let packed = packed.map_err(|e| format!("the plugin stopped: {e}"))?;
+        self.take_output(packed)
+    }
+
+    fn draw(&mut self, fuel: u64, request: &PaintRequest) -> Result<Vec<u8>, String> {
+        let paint = self.paint.ok_or("this plugin doesn't draw")?;
+        // A frame gets the same limit as a run, as the plugin guide says.
+        self.store.set_fuel(fuel).map_err(|e| e.to_string())?;
+        let input = serde_json::to_vec(request).map_err(|e| e.to_string())?;
+        let at = self.hand_over(&input)?;
         let packed = paint
-            .call(&mut sandbox.store, (at, input.len() as u32))
+            .call(&mut self.store, (at, input.len() as u32))
             .map_err(|e| format!("the plugin stopped: {e}"))?;
-        sandbox.take_output(packed)
+        self.take_output(packed)
     }
 }

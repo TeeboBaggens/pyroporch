@@ -4,7 +4,7 @@
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 use std::collections::BTreeMap;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use crate::paths::{Paths, stamp, write_private};
 use crate::security::{approval_hash, sha256_hex};
@@ -456,6 +456,16 @@ pub struct Workspace {
     /// Problems found the last time the files were read.
     pub errors: Vec<String>,
     settings_stamp: Option<std::time::SystemTime>,
+    /// The settings as they were last read, so a save can tell what we changed from what another
+    /// program changed.
+    settings_loaded: Option<Settings>,
+    /// Profiles with work that isn't saved yet, and the autosave file holding it.
+    unsaved: BTreeMap<String, PathBuf>,
+    /// `config.toml` has been read successfully at least once, so `settings` came from it.
+    settings_read: bool,
+    /// `config.toml` is there but can't be used right now, so it mustn't be saved over.
+    settings_broken: bool,
+    grants_stamp: Option<std::time::SystemTime>,
     profile_stamps: BTreeMap<String, Option<std::time::SystemTime>>,
     /// The profiles as they were last read from their files, so a save can tell what we
     /// changed from what another program changed.
@@ -487,11 +497,89 @@ const SETTINGS_HEADER: &str = "# Pyro Porch settings. Edits here are picked up w
 const PROFILE_HEADER: &str = "# A Pyro Porch profile: a grid of keys, across one or more pages.\n# Secrets never go here; refer to the vault with {{secret:name}}.\n\n";
 
 /// Reads a profile from its file, if it can be read.
-fn read_profile(path: &Path) -> Option<Profile> {
-    let text = std::fs::read_to_string(path).ok()?;
-    let profile: Profile = toml::from_str(&text).ok()?;
-    profile.validate().ok()?;
-    Some(profile)
+/// `None` means there's no file. A file that can't be used is an error, so it isn't saved over.
+fn read_profile(path: &Path) -> Result<Option<Profile>, String> {
+    let text = match std::fs::read_to_string(path) {
+        Ok(text) => text,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(e) => return Err(e.to_string()),
+    };
+    let mut profile: Profile = toml::from_str(&text).map_err(|e| e.message().to_string())?;
+    profile.validate()?;
+    profile.upgrade_old_fields();
+    Ok(Some(profile))
+}
+
+/// An autosave name for a profile with no file yet, from the local date and time.
+fn free_dated_autosave(dir: &Path) -> PathBuf {
+    let date = chrono::Local::now().format("%Y-%m-%d_%H%M%S");
+    let mut path = dir.join(format!("{date}_autosave.toml"));
+    let mut n = 2;
+    while path.exists() {
+        path = dir.join(format!("{date}-{n}_autosave.toml"));
+        n += 1;
+    }
+    path
+}
+
+/// Puts our changes to the settings together with anyone else's, setting by setting.
+fn merge_settings(before: Option<&Settings>, ours: &Settings, disk: &Settings) -> Result<Settings, String> {
+    let Some(before) = before else {
+        return Ok(ours.clone());
+    };
+    let value = |settings: &Settings| serde_json::to_value(settings).map_err(|e| e.to_string());
+    let merged = merge_values(&value(before)?, &value(ours)?, &value(disk)?);
+    serde_json::from_value(merged).map_err(|e| e.to_string())
+}
+
+/// What we didn't change stays as the file has it. If both sides changed something, tables are
+/// looked into, a list of named things is put together by name, and otherwise ours stands.
+fn merge_values(before: &serde_json::Value, ours: &serde_json::Value, disk: &serde_json::Value) -> serde_json::Value {
+    use serde_json::Value;
+    if ours == before {
+        return disk.clone();
+    }
+    if disk == before {
+        return ours.clone();
+    }
+    match (before, ours, disk) {
+        (Value::Object(before), Value::Object(ours), Value::Object(disk)) => {
+            let mut merged = disk.clone();
+            for (key, our_value) in ours {
+                let inner = match (before.get(key), disk.get(key)) {
+                    (Some(before_value), Some(disk_value)) => merge_values(before_value, our_value, disk_value),
+                    _ => our_value.clone(),
+                };
+                merged.insert(key.clone(), inner);
+            }
+            merged.retain(|key, _| ours.contains_key(key) || !before.contains_key(key));
+            Value::Object(merged)
+        }
+        (Value::Array(before), Value::Array(ours), Value::Array(disk)) if [before, ours, disk].iter().all(|list| all_named(list)) => {
+            let find = |list: &[Value], name: &Value| list.iter().find(|item| item["name"] == *name).cloned();
+            let mut merged: Vec<Value> = Vec::new();
+            for item in disk {
+                let name = &item["name"];
+                match (find(ours, name), find(before, name)) {
+                    (None, Some(_)) => {}
+                    (Some(our_item), Some(before_item)) if our_item != before_item => merged.push(our_item),
+                    (Some(our_item), None) => merged.push(our_item),
+                    _ => merged.push(item.clone()),
+                }
+            }
+            for item in ours {
+                if find(disk, &item["name"]).is_none() && find(before, &item["name"]).is_none_or(|old| old != *item) {
+                    merged.push(item.clone());
+                }
+            }
+            Value::Array(merged)
+        }
+        _ => ours.clone(),
+    }
+}
+
+fn all_named(list: &[serde_json::Value]) -> bool {
+    list.iter().all(|item| item["name"].is_string())
 }
 
 /// Puts our changes together with anyone else's, so a save doesn't throw away a change another
@@ -539,9 +627,11 @@ fn merge_pages(before: Option<&Page>, ours: &Page, disk: &Page) -> Page {
         };
         keys.extend(chosen.cloned());
     }
-    // Keys only we have.
+    // Keys only we have. One we had all along and didn't change has been removed or moved by
+    // someone else, so it stays away.
     for our_key in &ours.keys {
-        if disk.key_at(our_key.row, our_key.col).is_none() {
+        let unchanged = before.and_then(|before| before.key_at(our_key.row, our_key.col)) == Some(our_key);
+        if disk.key_at(our_key.row, our_key.col).is_none() && !unchanged {
             keys.push(our_key.clone());
         }
     }
@@ -568,6 +658,11 @@ impl Workspace {
             profiles: BTreeMap::new(),
             errors: Vec::new(),
             settings_stamp: None,
+            settings_loaded: None,
+            unsaved: BTreeMap::new(),
+            settings_read: false,
+            settings_broken: false,
+            grants_stamp: None,
             profile_stamps: BTreeMap::new(),
             loaded: BTreeMap::new(),
         };
@@ -596,31 +691,68 @@ impl Workspace {
             toml::from_str::<Settings>(&text).map_err(|e| e.message().to_string())
         }) {
             Ok(settings) if settings.version > CONFIG_VERSION => {
-                self.errors.push("config.toml: made by a newer version of Pyro Porch".into());
+                self.refuse_settings_file("made by a newer version of Pyro Porch");
                 false
             }
             Ok(settings) => {
                 // A hand-edited file may hold values the app doesn't have. They are still
                 // used, but the person is told.
                 self.errors.extend(settings.problems().into_iter().map(|problem| format!("config.toml: {problem}")));
+                self.settings_loaded = Some(settings.clone());
                 self.settings = settings;
+                self.settings_read = true;
+                self.settings_broken = false;
                 true
             }
             Err(e) => {
-                self.errors.push(format!("config.toml: {e}. Keeping the last good settings."));
+                self.refuse_settings_file(&e);
                 false
             }
+        }
+    }
+
+    /// The file can't be used. It's left alone for the person to fix. If it has never been read,
+    /// what it says about assistant access is unknown, so the safe answer is used until it is.
+    fn refuse_settings_file(&mut self, problem: &str) {
+        self.settings_broken = self.paths.config().exists();
+        let kept = if self.settings_read {
+            "Keeping the last good settings"
+        } else {
+            self.settings.mcp.enabled = false;
+            self.settings.mcp.read_only = true;
+            "Using the default settings with assistant access off"
+        };
+        self.errors.push(format!("config.toml: {problem}. {kept}, and not saving over the file until it's fixed."));
+    }
+
+    /// `config.toml` is there but can't be used, so changes to the settings can't be saved yet.
+    pub fn settings_file_broken(&self) -> bool {
+        self.settings_broken
+    }
+
+    /// Says what's wrong with `grants.toml`, whenever the file changes.
+    fn check_grants_file(&mut self) {
+        let now = stamp(&self.paths.grants());
+        if now == self.grants_stamp {
+            return;
+        }
+        self.grants_stamp = now;
+        self.errors.retain(|e| !e.starts_with("grants.toml"));
+        if let Err(problem) = crate::policy::Grants::try_load(&self.paths) {
+            self.errors.push(problem);
         }
     }
 
     /// Picks up edits made outside the app. Returns true if anything changed.
     pub fn check_reload(&mut self) -> bool {
         let mut changed = self.reload_settings();
+        self.check_grants_file();
         let mut seen = Vec::new();
         if let Ok(entries) = std::fs::read_dir(self.paths.profiles_dir()) {
             for entry in entries.flatten() {
                 let path = entry.path();
-                if path.extension().and_then(|e| e.to_str()) != Some("toml") {
+                // Only plain files: reading a pipe could wait forever, and this runs at every start.
+                if path.extension().and_then(|e| e.to_str()) != Some("toml") || !path.is_file() {
                     continue;
                 }
                 let Some(id) = path.file_stem().and_then(|s| s.to_str()).map(str::to_string) else {
@@ -640,6 +772,9 @@ impl Workspace {
                     profile.upgrade_old_fields();
                     Ok(profile)
                 }) {
+                    // The person is partway through changing this one. The two come together
+                    // when they save it.
+                    Ok(_) if self.unsaved.contains_key(&id) => {}
                     Ok(profile) => {
                         self.profiles.insert(id.clone(), profile.clone());
                         self.loaded.insert(id, profile);
@@ -649,7 +784,7 @@ impl Workspace {
                 }
             }
         }
-        let gone: Vec<String> = self.profiles.keys().filter(|id| !seen.contains(id)).cloned().collect();
+        let gone: Vec<String> = self.profiles.keys().filter(|id| !seen.contains(id) && !self.unsaved.contains_key(*id)).cloned().collect();
         for id in gone {
             self.profiles.remove(&id);
             self.profile_stamps.remove(&id);
@@ -664,10 +799,111 @@ impl Workspace {
     }
 
     pub fn save_settings(&mut self) -> Result<(), String> {
-        let text = format!("{SETTINGS_HEADER}{}", to_toml(&self.settings)?);
+        if self.settings_broken {
+            return Err("config.toml has a mistake, so it wasn't saved over. Fix it first".into());
+        }
+        // Another program may have changed this file since we last read it, so our changes are
+        // put together with theirs instead of overwriting them.
+        let merged = match self.read_settings_for_merge()? {
+            Some(disk) => merge_settings(self.settings_loaded.as_ref(), &self.settings, &disk)?,
+            None => self.settings.clone(),
+        };
+        let text = format!("{SETTINGS_HEADER}{}", to_toml(&merged)?);
         write_private(&self.paths.config(), text.as_bytes()).map_err(|e| e.to_string())?;
         self.settings_stamp = stamp(&self.paths.config());
+        self.settings_loaded = Some(merged.clone());
+        self.settings = merged;
+        self.settings_read = true;
         Ok(())
+    }
+
+    fn read_settings_for_merge(&self) -> Result<Option<Settings>, String> {
+        let text = match std::fs::read_to_string(self.paths.config()) {
+            Ok(text) => text,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(e) => return Err(format!("couldn't read config.toml, so it wasn't saved over: {e}")),
+        };
+        let disk: Settings = toml::from_str(&text).map_err(|e| format!("config.toml has a mistake ({}), so it wasn't saved over. Fix it first", e.message()))?;
+        if disk.version > CONFIG_VERSION {
+            return Err("config.toml was made by a newer version of Pyro Porch, so it wasn't saved over".into());
+        }
+        Ok(Some(disk))
+    }
+
+    /// Keeps the person's work without touching the profile's own file. The file is named after
+    /// the profile's once it has one, and after the date until then.
+    pub fn autosave_profile(&mut self, id: &str) -> Result<(), String> {
+        let profile = self.profiles.get(id).ok_or("no such profile")?;
+        let path = match self.unsaved.get(id) {
+            Some(path) => path.clone(),
+            None if self.paths.profile(id).exists() => self.paths.autosave_dir().join(format!("{id}_autosave.toml")),
+            None => free_dated_autosave(&self.paths.autosave_dir()),
+        };
+        let text = format!("{PROFILE_HEADER}{}", to_toml(profile)?);
+        write_private(&path, text.as_bytes()).map_err(|e| e.to_string())?;
+        self.unsaved.insert(id.to_string(), path);
+        Ok(())
+    }
+
+    /// Whether this profile has work that isn't in its own file yet.
+    pub fn has_unsaved(&self, id: &str) -> bool {
+        self.unsaved.contains_key(id)
+    }
+
+    /// Picks up work left in autosave files after the app closed, as unsaved work. Returns the
+    /// profiles that had some. A file that can't be read is left there and reported.
+    pub fn recover_autosaves(&mut self) -> Vec<String> {
+        let mut recovered = Vec::new();
+        let mut files: Vec<PathBuf> = std::fs::read_dir(self.paths.autosave_dir())
+            .into_iter()
+            .flatten()
+            .flatten()
+            .map(|entry| entry.path())
+            .filter(|path| path.is_file() && path.extension().and_then(|e| e.to_str()) == Some("toml"))
+            .collect();
+        files.sort();
+        for path in files {
+            let label = path.file_name().map_or_else(String::new, |n| n.to_string_lossy().into_owned());
+            let profile = match read_profile(&path) {
+                Ok(Some(profile)) => profile,
+                Ok(None) => continue,
+                Err(e) => {
+                    self.errors.push(format!("{label}: {e}. It was left in the autosave folder."));
+                    continue;
+                }
+            };
+            let named = label.strip_suffix("_autosave.toml").filter(|id| self.profiles.contains_key(*id)).map(str::to_string);
+            let id = named.unwrap_or_else(|| self.free_profile_id(&profile.name));
+            if self.profiles.get(&id) == Some(&profile) {
+                let _ = std::fs::remove_file(&path);
+                continue;
+            }
+            self.profiles.insert(id.clone(), profile);
+            self.unsaved.insert(id.clone(), path);
+            recovered.push(id);
+        }
+        recovered
+    }
+
+    /// A file name for a new profile that nothing else is using.
+    fn free_profile_id(&self, name: &str) -> String {
+        let base = profile_id(name);
+        let mut id = base.clone();
+        let mut n = 2;
+        // A file that couldn't be read isn't in the list, but its name is still taken.
+        while self.profiles.contains_key(&id) || self.paths.profile(&id).exists() {
+            id = format!("{base}-{n}");
+            n += 1;
+        }
+        id
+    }
+
+    /// Adds a profile the person hasn't saved yet: it only exists in an autosave file.
+    pub fn add_unsaved_profile(&mut self, profile: Profile) -> Result<String, String> {
+        let id = self.free_profile_id(&profile.name);
+        self.profiles.insert(id.clone(), profile);
+        self.autosave_profile(&id)?;
+        Ok(id)
     }
 
     pub fn save_profile(&mut self, id: &str) -> Result<(), String> {
@@ -675,7 +911,8 @@ impl Workspace {
         let path = self.paths.profile(id);
         // Another program may have changed this file since we last read it, so our changes are
         // put together with theirs instead of overwriting them.
-        let merged = match read_profile(&path) {
+        let on_disk = read_profile(&path).map_err(|e| format!("{id}.toml has a mistake ({e}), so it wasn't saved over. Fix it first"))?;
+        let merged = match on_disk {
             Some(disk) => merge_profiles(self.loaded.get(id), profile, &disk),
             None => profile.clone(),
         };
@@ -685,18 +922,16 @@ impl Workspace {
         self.profiles.insert(id.to_string(), merged.clone());
         self.loaded.insert(id.to_string(), merged);
         self.profile_stamps.insert(id.to_string(), stamp(&path));
+        // It's all in its own file now, so the autosave has done its job.
+        if let Some(autosave) = self.unsaved.remove(id) {
+            let _ = std::fs::remove_file(autosave);
+        }
         Ok(())
     }
 
     /// Adds a profile, finding a free file name. Returns its id.
     pub fn add_profile(&mut self, profile: Profile) -> Result<String, String> {
-        let base = profile_id(&profile.name);
-        let mut id = base.clone();
-        let mut n = 2;
-        while self.profiles.contains_key(&id) {
-            id = format!("{base}-{n}");
-            n += 1;
-        }
+        let id = self.free_profile_id(&profile.name);
         self.profiles.insert(id.clone(), profile);
         self.save_profile(&id)?;
         Ok(id)
@@ -709,7 +944,14 @@ impl Workspace {
         self.profiles.remove(id);
         self.profile_stamps.remove(id);
         self.loaded.remove(id);
-        std::fs::remove_file(self.paths.profile(id)).map_err(|e| e.to_string())?;
+        if let Some(autosave) = self.unsaved.remove(id) {
+            let _ = std::fs::remove_file(autosave);
+        }
+        // A profile that was never saved has no file.
+        match std::fs::remove_file(self.paths.profile(id)) {
+            Err(e) if e.kind() != std::io::ErrorKind::NotFound => return Err(e.to_string()),
+            _ => {}
+        }
         if self.settings.active_profile == id
             && let Some(first) = self.profiles.keys().next().cloned()
         {
@@ -771,6 +1013,188 @@ mod tests {
         ws.check_reload();
         assert!(ws.profiles.contains_key("default"));
         assert_eq!(ws.errors.len(), 1);
+    }
+
+    #[test]
+    fn a_config_file_that_cant_be_read_at_the_start_turns_assistant_access_off() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        let text = "[mcp]\nenabled = false\n[security]\nauto_lock_minutes = \"ten\"\n";
+        std::fs::write(&path, text).unwrap();
+        let mut ws = Workspace::load(Paths::at(dir.path())).unwrap();
+        assert!(!ws.settings.mcp.enabled);
+        assert!(ws.settings.mcp.read_only);
+        assert!(ws.errors[0].contains("assistant access off"), "{:?}", ws.errors);
+
+        // Saving is refused, so the person's choice isn't replaced with the defaults.
+        assert!(ws.save_settings().is_err());
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), text);
+
+        // Once it's fixed, everything goes back to normal.
+        write_later(&path, "[mcp]\nenabled = true\n");
+        assert!(ws.check_reload());
+        assert!(ws.settings.mcp.enabled);
+        assert!(ws.errors.is_empty(), "{:?}", ws.errors);
+        ws.save_settings().unwrap();
+    }
+
+    #[test]
+    fn a_config_file_that_breaks_later_keeps_the_last_good_settings_and_the_file() {
+        let (dir, mut ws) = workspace();
+        let path = dir.path().join("config.toml");
+        write_later(&path, "[ui]\nscale = 1.5\n");
+        ws.check_reload();
+        write_later(&path, "version = 999\n");
+        ws.check_reload();
+        assert_eq!(ws.settings.ui.scale, 1.5);
+        assert!(ws.settings.mcp.enabled, "the person's settings are still known");
+        assert!(ws.save_settings().is_err());
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "version = 999\n");
+    }
+
+    #[test]
+    fn a_save_doesnt_bring_back_a_key_someone_else_removed_or_moved() {
+        let (dir, mut ws) = workspace();
+        let keys = ws.profiles["default"].pages[0].keys.len();
+        assert!(keys >= 2);
+        let (row, col) = (ws.profiles["default"].pages[0].keys[0].row, ws.profiles["default"].pages[0].keys[0].col);
+
+        let mut other = Workspace::load(Paths::at(dir.path())).unwrap();
+        other.profiles.get_mut("default").unwrap().pages[0].remove_at(row, col);
+        other.save_profile("default").unwrap();
+
+        // Our change to another key goes in, and the removed key doesn't come back.
+        ws.profiles.get_mut("default").unwrap().pages[0].keys[1].title = "Ours".into();
+        ws.save_profile("default").unwrap();
+        let page = &ws.profiles["default"].pages[0];
+        assert_eq!(page.keys.len(), keys - 1);
+        assert!(page.key_at(row, col).is_none());
+        assert!(page.keys.iter().any(|key| key.title == "Ours"));
+    }
+
+    #[test]
+    fn saving_settings_keeps_what_another_program_changed() {
+        let (dir, mut ws) = workspace();
+        let path = dir.path().join("config.toml");
+        ws.settings.ui.scale = 1.5;
+        // The person turns assistant access off and an assistant adds a preset, on disk.
+        let mut other = Workspace::load(Paths::at(dir.path())).unwrap();
+        other.settings.mcp.enabled = false;
+        other.settings.presets.push(Preset { name: "Theirs".into(), ..Preset::default() });
+        other.save_settings().unwrap();
+
+        ws.settings.presets.push(Preset { name: "Ours".into(), ..Preset::default() });
+        ws.save_settings().unwrap();
+        for settings in [&ws.settings, &toml::from_str::<Settings>(&std::fs::read_to_string(&path).unwrap()).unwrap()] {
+            assert!(!settings.mcp.enabled, "their change stands");
+            assert_eq!(settings.ui.scale, 1.5, "ours stands too");
+            let names: Vec<&str> = settings.presets.iter().map(|preset| preset.name.as_str()).collect();
+            assert_eq!(names, vec!["Theirs", "Ours"]);
+        }
+    }
+
+    #[test]
+    fn autosaves_never_touch_the_profiles_own_file() {
+        let (dir, mut ws) = workspace();
+        let main = dir.path().join("profiles/default.toml");
+        let before = std::fs::read_to_string(&main).unwrap();
+        ws.profiles.get_mut("default").unwrap().name = "Changed".into();
+        ws.autosave_profile("default").unwrap();
+        assert!(ws.has_unsaved("default"));
+        assert_eq!(std::fs::read_to_string(&main).unwrap(), before);
+        let autosave = dir.path().join("autosave/default_autosave.toml");
+        assert!(std::fs::read_to_string(&autosave).unwrap().contains("Changed"));
+
+        // The app doesn't take it for a profile, and an outside edit doesn't undo the work.
+        write_later(&main, &before.replace("rows = 3", "rows = 4"));
+        ws.check_reload();
+        assert_eq!(ws.profiles.len(), 1);
+        assert_eq!(ws.profiles["default"].name, "Changed");
+
+        // Saving puts it in the file and clears the autosave.
+        ws.save_profile("default").unwrap();
+        assert!(!ws.has_unsaved("default"));
+        assert!(!autosave.exists());
+        assert!(std::fs::read_to_string(&main).unwrap().contains("Changed"));
+    }
+
+    #[test]
+    fn a_profile_that_was_never_saved_autosaves_under_the_date_until_it_is() {
+        let (dir, mut ws) = workspace();
+        let id = ws.add_unsaved_profile(Profile { name: "Studio".into(), ..Profile::default() }).unwrap();
+        assert_eq!(id, "studio");
+        assert!(!dir.path().join("profiles/studio.toml").exists());
+        let files: Vec<String> = std::fs::read_dir(dir.path().join("autosave")).unwrap().flatten().map(|e| e.file_name().to_string_lossy().into_owned()).collect();
+        assert_eq!(files.len(), 1);
+        let today = chrono::Local::now().format("%Y-%m-%d_").to_string();
+        assert!(files[0].starts_with(&today) && files[0].ends_with("_autosave.toml"), "{files:?}");
+
+        // It survives a look at the folder, and the same file keeps being used.
+        ws.check_reload();
+        assert!(ws.profiles.contains_key("studio"));
+        ws.autosave_profile("studio").unwrap();
+        assert_eq!(std::fs::read_dir(dir.path().join("autosave")).unwrap().count(), 1);
+
+        ws.save_profile("studio").unwrap();
+        assert!(dir.path().join("profiles/studio.toml").exists());
+        assert_eq!(std::fs::read_dir(dir.path().join("autosave")).unwrap().count(), 0);
+    }
+
+    #[test]
+    fn unsaved_work_comes_back_after_the_app_closes() {
+        let (dir, mut ws) = workspace();
+        ws.profiles.get_mut("default").unwrap().name = "Changed".into();
+        ws.autosave_profile("default").unwrap();
+        ws.add_unsaved_profile(Profile { name: "Studio".into(), ..Profile::default() }).unwrap();
+        std::fs::write(dir.path().join("autosave/broken_autosave.toml"), "rows = [not valid").unwrap();
+
+        let mut again = Workspace::load(Paths::at(dir.path())).unwrap();
+        assert_ne!(again.profiles["default"].name, "Changed", "only when asked for");
+        let mut recovered = again.recover_autosaves();
+        recovered.sort();
+        assert_eq!(recovered, vec!["default".to_string(), "studio".to_string()]);
+        assert_eq!(again.profiles["default"].name, "Changed");
+        assert!(again.has_unsaved("studio"));
+        assert!(again.errors.iter().any(|e| e.starts_with("broken_autosave.toml")), "{:?}", again.errors);
+        assert!(dir.path().join("autosave/broken_autosave.toml").exists());
+    }
+
+    #[test]
+    fn a_profile_file_with_a_mistake_is_never_saved_over() {
+        let (dir, mut ws) = workspace();
+
+        // Broken since the start: a new profile of the same name takes another file.
+        let refused = dir.path().join("profiles/studio.toml");
+        write_later(&refused, "version = 999\n[[pages]]\nname = \"x\"\n");
+        ws.check_reload();
+        let id = ws.add_profile(Profile::sample(false)).unwrap();
+        assert_ne!(id, "studio");
+        let mut studio = Profile::sample(false);
+        studio.name = "Studio".into();
+        assert_eq!(ws.add_profile(studio).unwrap(), "studio-2");
+        assert!(std::fs::read_to_string(&refused).unwrap().contains("999"));
+
+        // Broke after it was read: the last good copy doesn't replace it.
+        let broken = dir.path().join("profiles/default.toml");
+        write_later(&broken, "rows = [not valid");
+        ws.check_reload();
+        assert!(ws.save_profile("default").is_err());
+        assert_eq!(std::fs::read_to_string(&broken).unwrap(), "rows = [not valid");
+    }
+
+    #[test]
+    fn a_grants_file_with_a_mistake_is_reported_and_never_saved_over() {
+        let (dir, mut ws) = workspace();
+        let path = dir.path().join("grants.toml");
+        write_later(&path, "[plugins.a\nenabled = true\n");
+        ws.check_reload();
+        assert!(ws.errors.iter().any(|e| e.starts_with("grants.toml")), "{:?}", ws.errors);
+        assert!(crate::policy::Grants::allow_host(&ws.paths, "a", "b.example").is_err());
+        assert!(std::fs::read_to_string(&path).unwrap().contains("[plugins.a\n"));
+
+        write_later(&path, "");
+        ws.check_reload();
+        assert!(ws.errors.is_empty(), "{:?}", ws.errors);
     }
 
     #[test]

@@ -216,7 +216,7 @@ impl App {
                         name: name.trim().to_string(),
                         ..Profile::default()
                     };
-                    match self.ws.add_profile(profile) {
+                    match self.ws.add_unsaved_profile(profile) {
                         Ok(id) => self.switch_profile(id),
                         Err(error) => self.log(false, error),
                     }
@@ -516,7 +516,8 @@ impl App {
             .current_page()
             .and_then(|page| page.key_at(from.0, from.1))
             .map_or(0, |key| key.folder.as_ref().map_or(0, |folder| folder.depth() + 1));
-        if self.folder.len() + brought > MAX_FOLDER_DEPTH {
+        // Going into the folder is one level further down than this screen.
+        if brought > 0 && self.folder.len() + 1 + brought > MAX_FOLDER_DEPTH {
             self.log(false, format!("folders can only go {MAX_FOLDER_DEPTH} deep"));
             return;
         }
@@ -1063,8 +1064,8 @@ impl App {
             match Grants::allow_host(&self.ws.paths, &plugin, &site) {
                 Ok(()) => {
                     self.grants = Grants::load(&self.ws.paths);
-                    self.pending.hosts.retain(|r| !(r.plugin == plugin && r.host == site));
-                    let _ = self.pending.save(&self.ws.paths);
+                    let _ = pyroporch_core::policy::Pending::remove_host(&self.ws.paths, &plugin, &site);
+                    self.pending = pyroporch_core::policy::Pending::load(&self.ws.paths);
                     self.log(true, format!("allowed {site}"));
                 }
                 Err(error) => self.log(false, error),
@@ -1079,6 +1080,14 @@ impl App {
             });
         }
         if remove {
+            // What's on screen may be an edit in progress, from before the slot changed. A folder
+            // with keys in it always gets its second click, going by what's really there.
+            let holding = self.current_page().and_then(|page| page.key_at(row, col)).and_then(|key| key.folder.as_ref()).is_some_and(|folder| !folder.keys.is_empty());
+            if holding && self.confirm_remove != Some((row, col)) {
+                self.draft = None;
+                self.confirm_remove = Some((row, col));
+                return;
+            }
             self.confirm_remove = None;
             self.remove_key(row, col);
             return;
@@ -1525,7 +1534,7 @@ fn field_form(ui: &mut Ui, field: &Field, label: egui::Id, settings: &mut Map<St
         }
         FieldKind::Number => {
             let mut number = settings.get(key).and_then(Value::as_f64).unwrap_or_else(|| field.default.as_f64().unwrap_or(0.0));
-            if ui.add(egui::DragValue::new(&mut number).range(0.0..=86_400.0)).labelled_by(label).on_hover_text(&field.help).changed() {
+            if ui.add(egui::DragValue::new(&mut number).range(0.0..=86_400.0).clamp_existing_to_range(false)).labelled_by(label).on_hover_text(&field.help).changed() {
                 settings.insert(key.into(), serde_json::json!(number));
             }
         }
@@ -1618,7 +1627,9 @@ fn key_values_form(ui: &mut Ui, key: &str, label: egui::Id, settings: &mut Map<S
             }
         }
         if ui.small_button("+ Add").clicked() {
-            pairs.push((format!("Header-{}", pairs.len() + 1), String::new()));
+            // A free name, because two of the same name would become one, losing a value.
+            let name = (pairs.len() + 1..).map(|n| format!("Header-{n}")).find(|name| pairs.iter().all(|(taken, _)| taken != name));
+            pairs.extend(name.map(|name| (name, String::new())));
         }
     });
     if let Some(index) = remove {

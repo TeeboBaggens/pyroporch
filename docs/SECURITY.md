@@ -23,10 +23,14 @@ off unless you choose it.
 ## Where credentials go
 
 - Plugins and assistants only ever handle a placeholder such as `{{secret:name}}`. The app fills it in
-  as the request leaves, and blanks any copy, plain or base64, out of the answer.
+  as the request leaves. Every secret allowed for that site is blanked out of the answer, plain, base64 or
+  encoded for an address, whether or not that request used it. While the vault is locked those secrets can't
+  be read to check for them, so a request to a site that has any is refused before it's sent.
 - Each secret names the sites it may go to, with no wildcards. Requests elsewhere are refused.
 - A placeholder can't appear in the part of an address that decides the site, so it can't change where
   a request goes.
+- A request can't set its own `Host` header or the headers that frame it, so a credential goes to the site
+  in the address and nowhere else behind it.
 - Redirects aren't followed, so an allowed site can't pass your credential on.
 - Unencrypted http is only allowed to this computer, unless you add `http://name` to `grants.toml`
   yourself.
@@ -47,7 +51,7 @@ These are refused:
 Plugins, including the two samples the app comes with, run in a WebAssembly sandbox with no access
 to files, the network, programs or other plugins. Their one way out is a call to the app, which checks it against what you've allowed.
 They stay off until you approve them, the approval is tied to the file's SHA-256 fingerprint, and
-limits on memory (64 MiB) and instructions stop a plugin that misbehaves. The app approves its own
+limits on memory (one block of up to 64 MiB) and instructions stop a plugin that misbehaves. The app approves its own
 samples when it installs them, because it carries them. Editing one means approving it again. A plugin
 can't mark itself as anything else: only what its approval and the person's choices allow gets through. See
 [the plugin guide](../plugins/README.md) for the full list of what a plugin can and can't reach.

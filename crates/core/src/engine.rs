@@ -327,6 +327,9 @@ pub struct Engine {
 }
 
 fn read_manifest(dir: &std::path::Path) -> Result<Manifest, String> {
+    if !dir.join("plugin.toml").is_file() {
+        return Err("it isn't a plain file".into());
+    }
     let text = std::fs::read_to_string(dir.join("plugin.toml")).map_err(|e| e.to_string())?;
     let manifest: Manifest = toml::from_str(&text).map_err(|e| e.message().to_string())?;
     if manifest.id.is_empty() || manifest.wasm.is_empty() {
@@ -369,7 +372,9 @@ fn why_not_a_plugin(path: &std::path::Path, builtin_ids: &[String]) -> Option<St
             "This plugin file needs its own folder here, next to a plugin.toml that says what it asks for.".to_string()
         });
     }
-    if let Ok(text) = std::fs::read_to_string(path.join("Cargo.toml")) {
+    if path.join("Cargo.toml").is_file()
+        && let Ok(text) = std::fs::read_to_string(path.join("Cargo.toml"))
+    {
         let name = text
             .parse::<toml::Table>()
             .ok()
@@ -413,13 +418,14 @@ impl Engine {
     /// means hashing every plugin's file, so it isn't done for nothing.
     pub fn refresh_plugins_if_changed(&self) {
         let stamp = self.plugins_stamp();
-        let Ok(slot) = self.folder_stamp.lock() else {
-            return;
+        // The lock is let go before refreshing, because refreshing takes it too.
+        let unchanged = match self.folder_stamp.lock() {
+            Ok(slot) => *slot == Some(stamp),
+            Err(_) => return,
         };
-        if *slot == Some(stamp) {
-            return;
+        if !unchanged {
+            self.refresh_plugins();
         }
-        self.refresh_plugins();
     }
 
     /// What the plugins folder and the person's allowances look like right now.
@@ -446,7 +452,11 @@ impl Engine {
 
     /// Looks at the plugins folder again and loads what the person has approved.
     pub fn refresh_plugins(&self) {
-        let grants = Grants::load(&self.paths);
+        // A grants file with a mistake allows nothing, and the cards say why.
+        let (grants, grants_broken) = match Grants::try_load(&self.paths) {
+            Ok(grants) => (grants, false),
+            Err(_) => (Grants::default(), true),
+        };
         let mut loaded = Vec::new();
         let mut statuses = Vec::new();
         // A plugin whose file hasn't changed keeps the copy that was already loaded, so an
@@ -529,8 +539,16 @@ impl Engine {
                 statuses.push(status);
                 continue;
             }
+            // These names say the app itself vouches for something, so a plugin can't take one.
+            if (manifest.id.starts_with("core.") || manifest.id.starts_with("pyroporch.")) && !is_sample(&manifest.id) {
+                status.note = "Its id starts with a name kept for the app itself, so it was ignored.".into();
+                statuses.push(status);
+                continue;
+            }
             let path = dir.join(&manifest.wasm);
             let bytes = match std::fs::metadata(&path) {
+                // Reading a pipe or a device could wait or go on forever, before any approval.
+                Ok(meta) if !meta.is_file() => Err(format!("{} isn't a plain file.", manifest.wasm)),
                 Ok(meta) if meta.len() as usize > MAX_WASM_BYTES => Err("The plugin file is too big.".to_string()),
                 Ok(_) => std::fs::read(&path).map_err(|e| e.to_string()),
                 Err(e) => Err(format!("Can't read {}: {e}", manifest.wasm)),
@@ -546,7 +564,9 @@ impl Engine {
             status.sha256 = sha256_hex(&bytes);
             let grant = grants.plugins.get(&manifest.id).cloned().unwrap_or_default();
             status.http_hosts = grant.http_hosts.clone();
-            if !grant.enabled {
+            if grants_broken {
+                status.note = "grants.toml has a mistake, so this stays off until it's fixed.".into();
+            } else if !grant.enabled {
                 status.note = "Waiting for your approval.".into();
             } else if grant.sha256 != status.sha256 {
                 status.note = "The plugin file changed since you approved it, so it needs approving again.".into();
@@ -628,12 +648,14 @@ impl Engine {
             .into_iter()
             .find(|s| s.id == id)
             .ok_or("no such plugin")?;
-        let mut grants = Grants::load(&self.paths);
+        let mut grants = Grants::try_load(&self.paths)?;
         let grant = grants.plugins.entry(id.to_string()).or_default();
         grant.enabled = true;
         grant.sha256 = status.sha256;
-        // Sites the person already allowed for this plugin stay allowed.
+        // Sites the person already allowed for this plugin stay allowed. Unencrypted traffic is
+        // only ever allowed by editing the file, so approving can't grant it.
         for host in status.requested.http_hosts {
+            let host = host.strip_prefix("http://").unwrap_or(&host).to_string();
             if !grant.http_hosts.contains(&host) {
                 grant.http_hosts.push(host);
             }
@@ -647,7 +669,7 @@ impl Engine {
     }
 
     pub fn disable_plugin(&self, id: &str) -> Result<(), String> {
-        let mut grants = Grants::load(&self.paths);
+        let mut grants = Grants::try_load(&self.paths)?;
         grants.plugins.entry(id.to_string()).or_default().enabled = false;
         grants.save(&self.paths)?;
         audit(&self.paths, "person", &format!("turned off plugin {id}"));
@@ -656,21 +678,25 @@ impl Engine {
     }
 
     /// Takes a plugin out of the plugins folder. Sites the person allowed are remembered, in case
-    /// it comes back, but its approval isn't.
-    pub fn remove_plugin(&self, id: &str) -> Result<(), String> {
-        let status = self
-            .plugin_statuses()
-            .into_iter()
-            .find(|s| s.id == id && !s.builtin)
+    /// it comes back, but its approval isn't. The folder says which one is meant, because a copied
+    /// plugin has the same id as the one it was copied from.
+    pub fn remove_plugin(&self, id: &str, folder: &str) -> Result<(), String> {
+        let statuses = self.plugin_statuses();
+        let status = statuses
+            .iter()
+            .find(|s| s.id == id && s.folder == folder && !s.builtin)
             .ok_or("that isn't in the plugins folder")?;
         if status.folder.is_empty() || status.folder.contains(['/', '\\']) || status.folder == ".." {
             return Err("that isn't in the plugins folder".into());
         }
+        // Checked first, so a file that can't be updated doesn't leave the job half done.
+        let mut grants = Grants::try_load(&self.paths)?;
         let path = self.paths.plugins_dir().join(&status.folder);
         let removed = if path.is_dir() { std::fs::remove_dir_all(&path) } else { std::fs::remove_file(&path) };
         removed.map_err(|e| format!("couldn't remove it: {e}"))?;
-        let mut grants = Grants::load(&self.paths);
-        if let Some(grant) = grants.plugins.get_mut(id) {
+        // With a copy still there, the approval stays: it only covers the exact file approved.
+        let copy_left = statuses.iter().any(|s| s.id == id && s.folder != folder);
+        if !copy_left && let Some(grant) = grants.plugins.get_mut(id) {
             grant.enabled = false;
             grant.sha256.clear();
             grants.save(&self.paths)?;
@@ -806,7 +832,9 @@ impl Engine {
             ..RunReport::default()
         };
         let mut messages = Vec::new();
-        for step in &key.steps {
+        // A timer only repeats what asked to be repeated, never the steps that change something.
+        let steps = key.steps.iter().filter(|step| trigger == Trigger::Press || self.is_refreshable(&step.action));
+        for step in steps {
             if step.delay_ms > 0 {
                 std::thread::sleep(Duration::from_millis(step.delay_ms.min(600_000)));
             }
@@ -857,6 +885,7 @@ impl Engine {
             any_secret,
             secrets_allowed,
             actor: actor.to_string(),
+            counts_as_use: trigger == Trigger::Press,
             grants: std::sync::OnceLock::new(),
         });
         let mut outcome = plugin.run(
@@ -941,6 +970,123 @@ mod tests {
             settings: settings.as_object().unwrap().clone(),
             delay_ms: 0,
         }
+    }
+
+    #[test]
+    fn a_changed_plugins_folder_is_noticed_without_hanging() {
+        let (dir, engine) = engine();
+        let path = dir.path().join("plugins/third");
+        std::fs::create_dir_all(&path).unwrap();
+        std::fs::write(path.join("plugin.toml"), "id = \"com.third\"\nwasm = \"p.wasm\"\n").unwrap();
+        let engine = Arc::new(engine);
+        let (sender, receiver) = std::sync::mpsc::channel();
+        let worker = engine.clone();
+        std::thread::spawn(move || {
+            worker.refresh_plugins_if_changed();
+            let _ = sender.send(());
+        });
+        receiver.recv_timeout(Duration::from_secs(20)).expect("the refresh hung");
+        assert!(engine.plugin_statuses().iter().any(|s| s.id == "com.third"));
+    }
+
+    #[test]
+    fn removing_a_copied_plugin_leaves_the_original_and_its_approval() {
+        let (dir, engine) = engine();
+        for folder in ["dice", "dice-2"] {
+            let path = dir.path().join("plugins").join(folder);
+            std::fs::create_dir_all(&path).unwrap();
+            std::fs::write(path.join("plugin.toml"), "id = \"com.dice\"\nwasm = \"p.wasm\"\n").unwrap();
+            std::fs::write(path.join("p.wasm"), b"not really").unwrap();
+        }
+        engine.refresh_plugins();
+        engine.approve_plugin("com.dice").unwrap();
+        engine.remove_plugin("com.dice", "dice-2").unwrap();
+        assert!(dir.path().join("plugins/dice").exists());
+        assert!(!dir.path().join("plugins/dice-2").exists());
+        assert!(Grants::load(&engine.paths).plugins["com.dice"].enabled);
+        assert!(engine.remove_plugin("com.dice", "somewhere-else").is_err());
+
+        // Removing the last one does take the approval with it.
+        engine.remove_plugin("com.dice", "dice").unwrap();
+        assert!(!dir.path().join("plugins/dice").exists());
+        assert!(!Grants::load(&engine.paths).plugins["com.dice"].enabled);
+    }
+
+    #[test]
+    fn a_grants_file_with_a_mistake_stops_plugin_changes_and_says_why() {
+        let (dir, engine) = engine();
+        let path = dir.path().join("plugins/third");
+        std::fs::create_dir_all(&path).unwrap();
+        std::fs::write(path.join("plugin.toml"), "id = \"com.third\"\nwasm = \"p.wasm\"\n").unwrap();
+        std::fs::write(path.join("p.wasm"), b"not really").unwrap();
+        let grants = dir.path().join("grants.toml");
+        std::fs::write(&grants, "[plugins.a\n").unwrap();
+        engine.refresh_plugins();
+        let status = engine.plugin_statuses().into_iter().find(|s| s.id == "com.third").unwrap();
+        assert!(status.note.contains("grants.toml"), "{}", status.note);
+        assert!(engine.approve_plugin("com.third").is_err());
+        assert!(engine.disable_plugin("com.third").is_err());
+        assert!(engine.remove_plugin("com.third", "third").is_err());
+        assert!(path.exists(), "nothing is removed if the job can't be finished");
+        assert_eq!(std::fs::read_to_string(&grants).unwrap(), "[plugins.a\n");
+    }
+
+    #[test]
+    fn a_plugin_cant_take_a_name_kept_for_the_app() {
+        let (dir, engine) = engine();
+        let path = dir.path().join("plugins/fake");
+        std::fs::create_dir_all(&path).unwrap();
+        std::fs::write(path.join("plugin.toml"), "id = \"core.fake\"\nwasm = \"p.wasm\"\n").unwrap();
+        std::fs::write(path.join("p.wasm"), b"not really").unwrap();
+        engine.refresh_plugins();
+        let status = engine.plugin_statuses().into_iter().find(|s| s.id == "core.fake").unwrap();
+        assert!(status.note.contains("kept for the app"), "{}", status.note);
+        assert!(status.sha256.is_empty(), "so it can't be approved");
+    }
+
+    #[test]
+    fn a_timer_only_runs_the_steps_that_asked_to_refresh() {
+        let (_dir, engine) = engine();
+        let key = Key {
+            steps: vec![step("core.deck/sleep", json!({}))],
+            ..Key::default()
+        };
+        assert_eq!(engine.run_key(&key, Trigger::Press, "test", true).deck, vec![DeckControl::Sleep]);
+        assert!(engine.run_key(&key, Trigger::Refresh, "test", true).deck.is_empty());
+    }
+
+    #[test]
+    fn approving_a_plugin_never_allows_unencrypted_traffic() {
+        let (dir, engine) = engine();
+        let path = dir.path().join("plugins/third");
+        std::fs::create_dir_all(&path).unwrap();
+        let manifest = "id = \"com.third\"\nwasm = \"p.wasm\"\n[permissions]\nhttp_hosts = [\"http://api.example.com\"]\n";
+        std::fs::write(path.join("plugin.toml"), manifest).unwrap();
+        std::fs::write(path.join("p.wasm"), b"not really").unwrap();
+        engine.refresh_plugins();
+        engine.approve_plugin("com.third").unwrap();
+        assert_eq!(Grants::load(&engine.paths).plugins["com.third"].http_hosts, vec!["api.example.com".to_string()]);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_pipe_in_a_plugin_folder_is_refused_rather_than_read() {
+        let (dir, engine) = engine();
+        let path = dir.path().join("plugins/third");
+        std::fs::create_dir_all(&path).unwrap();
+        std::fs::write(path.join("plugin.toml"), "id = \"com.third\"\nwasm = \"p.wasm\"\n").unwrap();
+        let pipe = path.join("p.wasm");
+        assert!(std::process::Command::new("mkfifo").arg(&pipe).status().unwrap().success());
+        let engine = Arc::new(engine);
+        let (sender, receiver) = std::sync::mpsc::channel();
+        let worker = engine.clone();
+        std::thread::spawn(move || {
+            worker.refresh_plugins();
+            let _ = sender.send(());
+        });
+        receiver.recv_timeout(Duration::from_secs(20)).expect("reading the pipe hung");
+        let status = engine.plugin_statuses().into_iter().find(|s| s.id == "com.third").unwrap();
+        assert!(status.note.contains("plain file"), "{}", status.note);
     }
 
     #[test]

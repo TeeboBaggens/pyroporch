@@ -60,11 +60,11 @@ fn clear_retired(ws: &mut Workspace) -> Result<bool, String> {
         return Ok(false);
     };
     let path = ws.paths.plugins_dir().join(folder);
-    let on_disk = std::fs::read(path.join("plugin.wasm")).ok().map(|bytes| sha256_hex(&bytes));
+    let on_disk = hash_of_plain_file(&path.join("plugin.wasm"));
     if on_disk.as_ref() == Some(&recorded) {
         std::fs::remove_dir_all(&path).map_err(|e| e.to_string())?;
     }
-    let mut grants = Grants::load(&ws.paths);
+    let mut grants = Grants::try_load(&ws.paths)?;
     if grants.plugins.remove(id).is_some() {
         grants.save(&ws.paths)?;
     }
@@ -86,11 +86,11 @@ fn write_files(paths: &Paths, sample: &Sample) -> Result<(), String> {
 
 /// The app vouches for what it carries, so a sample starts out approved. Any sites the person has
 /// allowed already stay allowed.
-fn approve(paths: &Paths, sample: &Sample) -> Result<(), String> {
+fn approve(paths: &Paths, sample: &Sample, keep_off: bool) -> Result<(), String> {
     let manifest: Manifest = toml::from_str(sample.manifest).map_err(|e| e.message().to_string())?;
-    let mut grants = Grants::load(paths);
+    let mut grants = Grants::try_load(paths)?;
     let grant = grants.plugins.entry(sample.id.to_string()).or_default();
-    grant.enabled = true;
+    grant.enabled = !keep_off || grant.enabled;
     grant.sha256 = sha256_hex(sample.wasm);
     grant.secrets = manifest.permissions.secrets;
     grant.deck = manifest.permissions.deck;
@@ -102,11 +102,25 @@ fn approve(paths: &Paths, sample: &Sample) -> Result<(), String> {
     grants.save(paths)
 }
 
-fn install(ws: &mut Workspace, sample: &Sample) -> Result<(), String> {
+/// `keep_off` is for an update: one the person turned off stays off.
+fn install(ws: &mut Workspace, sample: &Sample, keep_off: bool) -> Result<(), String> {
     write_files(&ws.paths, sample)?;
-    approve(&ws.paths, sample)?;
+    approve(&ws.paths, sample, keep_off)?;
     ws.settings.sample_hashes.insert(sample.folder.to_string(), sha256_hex(sample.wasm));
     Ok(())
+}
+
+/// Reading a pipe or a device could wait forever, so only a plain file is looked at.
+fn hash_of_plain_file(path: &std::path::Path) -> Option<String> {
+    path.is_file().then(|| std::fs::read(path).ok()).flatten().map(|bytes| sha256_hex(&bytes))
+}
+
+/// Whether the two files that record the samples can be read, and so safely saved.
+fn can_record_changes(ws: &Workspace) -> Result<(), String> {
+    if ws.settings_file_broken() {
+        return Err("config.toml has a mistake that needs fixing first".into());
+    }
+    Grants::try_load(&ws.paths).map(|_| ())
 }
 
 /// Run at each start. Adds samples that have never been installed, and updates ones the person
@@ -117,17 +131,23 @@ pub fn sync(ws: &mut Workspace) -> Result<(), String> {
         write_private(&guide, GUIDE.as_bytes()).map_err(|e| e.to_string())?;
     }
     let _ = std::fs::remove_file(ws.paths.plugins_dir().join(OLD_GUIDE_FILE));
+    // Without these files there's no telling what the person chose, so nothing is decided for
+    // them. The app still starts and shows what's wrong, and the next start catches up.
+    if can_record_changes(ws).is_err() {
+        return Ok(());
+    }
     let mut changed = clear_retired(ws)?;
     for sample in &SAMPLES {
         let carried = sha256_hex(sample.wasm);
         let folder = ws.paths.plugins_dir().join(sample.folder);
         // Its note points at the guide, so it moves with it. A plugin's approval doesn't cover this.
         let note = folder.join("README.txt");
-        if note.exists() && std::fs::read_to_string(&note).ok().as_deref() != Some(README) {
+        if note.is_file() && std::fs::read_to_string(&note).ok().as_deref() != Some(README) {
             write_private(&note, README.as_bytes()).map_err(|e| e.to_string())?;
         }
-        let on_disk = std::fs::read(folder.join("plugin.wasm")).ok().map(|bytes| sha256_hex(&bytes));
+        let on_disk = hash_of_plain_file(&folder.join("plugin.wasm"));
         let recorded = ws.settings.sample_hashes.get(sample.folder);
+        let updating = recorded.is_some();
         let due = match recorded {
             // A folder of this name that the app didn't put there is someone's own.
             None => !folder.exists(),
@@ -135,7 +155,7 @@ pub fn sync(ws: &mut Workspace) -> Result<(), String> {
             Some(recorded) => on_disk.as_ref() == Some(recorded) && *recorded != carried,
         };
         if due {
-            install(ws, sample)?;
+            install(ws, sample, updating)?;
             changed = true;
         }
     }
@@ -156,9 +176,10 @@ pub fn missing(paths: &Paths) -> Vec<&'static str> {
 
 /// Puts back any samples that were removed.
 pub fn restore(ws: &mut Workspace) -> Result<(), String> {
+    can_record_changes(ws)?;
     for sample in &SAMPLES {
         if !ws.paths.plugins_dir().join(sample.folder).exists() {
-            install(ws, sample)?;
+            install(ws, sample, false)?;
         }
     }
     ws.save_settings()
@@ -255,12 +276,40 @@ mod tests {
     }
 
     #[test]
+    fn an_update_doesnt_turn_a_sample_back_on() {
+        let (dir, mut ws) = workspace();
+        sync(&mut ws).unwrap();
+        engine_for(&ws).disable_plugin("pyroporch.api-call").unwrap();
+
+        // An older copy, as the app left it, so the next start updates it.
+        let file = dir.path().join("plugins/api-call/plugin.wasm");
+        std::fs::write(&file, b"older").unwrap();
+        ws.settings.sample_hashes.insert("api-call".into(), sha256_hex(b"older"));
+        ws.save_settings().unwrap();
+        sync(&mut ws).unwrap();
+        assert_ne!(std::fs::read(&file).unwrap(), b"older", "it was updated");
+        assert!(!Grants::load(&ws.paths).plugins["pyroporch.api-call"].enabled);
+    }
+
+    #[test]
+    fn a_config_file_that_cant_be_read_doesnt_bring_samples_back_or_get_saved_over() {
+        let dir = tempfile::tempdir().unwrap();
+        let text = "[security]\nauto_lock_minutes = \"ten\"\n";
+        std::fs::write(dir.path().join("config.toml"), text).unwrap();
+        let mut ws = Workspace::load(Paths::at(dir.path())).unwrap();
+        sync(&mut ws).unwrap();
+        assert!(!dir.path().join("plugins/api-call").exists());
+        assert_eq!(std::fs::read_to_string(dir.path().join("config.toml")).unwrap(), text);
+        assert!(restore(&mut ws).is_err());
+    }
+
+    #[test]
     fn a_removed_sample_stays_gone_until_asked_for_and_keeps_the_sites_you_allowed() {
         let (dir, mut ws) = workspace();
         sync(&mut ws).unwrap();
         Grants::allow_host(&ws.paths, "pyroporch.api-call", "api.example.com").unwrap();
         let engine = engine_for(&ws);
-        engine.remove_plugin("pyroporch.api-call").unwrap();
+        engine.remove_plugin("pyroporch.api-call", "api-call").unwrap();
         assert!(!dir.path().join("plugins/api-call").exists());
         assert!(engine.spec("pyroporch.api-call/request").is_none(), "gone straight away");
         assert_eq!(missing(&ws.paths), vec!["api-call"]);
