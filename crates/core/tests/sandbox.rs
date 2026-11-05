@@ -199,7 +199,9 @@ fn the_quick_start_in_the_plugin_guide_works_from_start_to_finish() {
 
     let project = root.join("target/guide-check/dice");
     std::fs::create_dir_all(project.join("src")).unwrap();
-    let manifest = guide_example(guide, "Cargo.toml").replace("../pyroporch/crates/sdk", root.join("crates/sdk").to_str().unwrap());
+    // In forward slashes, as a Windows path's backslashes would be escapes in the file.
+    let sdk = root.join("crates/sdk").to_str().unwrap().trim_start_matches(r"\\?\").replace('\\', "/");
+    let manifest = guide_example(guide, "Cargo.toml").replace("../pyroporch/crates/sdk", &sdk);
     // Its own workspace, because this copy happens to sit inside the project's folder.
     std::fs::write(project.join("Cargo.toml"), format!("{manifest}\n\n[workspace]\n")).unwrap();
     let code = format!("{}\n\n{}\n", guide_example(guide, "lib.rs"), guide_example(guide, "tests"));
