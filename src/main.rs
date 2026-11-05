@@ -110,6 +110,9 @@ fn window_icon() -> eframe::egui::IconData {
 }
 
 fn run_app(screenshot: Option<PathBuf>, view: Option<String>) -> Result<(), String> {
+    if pyroporch_core::update::can_install() {
+        pyroporch_core::update::clear_leftovers();
+    }
     // Only a normal start takes the lock: a screenshot doesn't touch a copy that's running.
     let lock = if screenshot.is_none() {
         match instance::acquire(&Paths::from_env(), env!("PYROPORCH_BUILD"))? {

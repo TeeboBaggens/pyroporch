@@ -9,6 +9,7 @@ mod saver;
 mod screens;
 mod secret_field;
 mod theme;
+mod updates;
 
 #[cfg(all(test, feature = "desktop-actions"))]
 mod tests;
@@ -175,6 +176,7 @@ pub struct App {
     /// A page waiting for the person to say yes before it goes.
     pub confirm_delete_page: Option<usize>,
     undo: UndoHistory,
+    pub updates: updates::Updates,
     pub show_requests: bool,
     pub pending: Pending,
     pub grants: Grants,
@@ -288,6 +290,7 @@ impl App {
             new_page_name: None,
             confirm_delete_page: None,
             undo: UndoHistory::default(),
+            updates: updates::Updates::new(),
             show_requests: false,
             pending,
             grants,
@@ -658,6 +661,8 @@ impl App {
 
     /// Once a second: pick up outside edits, requests and timers.
     fn tick(&mut self, ctx: &egui::Context) {
+        self.finish_updates(ctx);
+        self.automatic_update_check(ctx);
         if self.last_tick.elapsed() < Duration::from_secs(1) {
             return;
         }
@@ -1008,6 +1013,14 @@ impl App {
                             let text = RichText::new(format!("🔔 {waiting} waiting for you")).color(Color32::BLACK);
                             if ui.add(egui::Button::new(text).fill(p.warn)).clicked() {
                                 self.show_requests = true;
+                            }
+                        }
+                        if self.view != View::Settings
+                            && let Some(found) = &self.updates.found
+                        {
+                            let text = RichText::new(format!("⬆ Version {} is out", found.version)).color(Color32::WHITE);
+                            if ui.add(egui::Button::new(text).fill(p.ok)).clicked() {
+                                self.view = View::Settings;
                             }
                         }
                         let status = self.deck_status.clone().unwrap_or_else(|| "On-screen deck".into());

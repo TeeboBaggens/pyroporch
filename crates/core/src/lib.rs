@@ -10,5 +10,6 @@ pub mod policy;
 pub mod sample_plugin;
 pub mod security;
 pub mod transfer;
+pub mod update;
 pub mod vault;
 pub mod wasm;
