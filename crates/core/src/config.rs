@@ -88,6 +88,8 @@ pub struct UiSettings {
     pub tray_icon: String,
     /// The groups in the action list that are folded away.
     pub collapsed_groups: Vec<String>,
+    /// The colours kept for choosing again, on any key.
+    pub favorite_colors: Vec<String>,
 }
 
 impl Default for UiSettings {
@@ -98,6 +100,7 @@ impl Default for UiSettings {
             scale: 1.0,
             tray_icon: "color".into(),
             collapsed_groups: Vec::new(),
+            favorite_colors: ["#2F6FDB", "#0F8B8D", "#2E8B57", "#7A4FD0", "#A83279", "#B4532A", "#C0392B", "#B8860B", "#3A4252", "#14171C"].map(String::from).to_vec(),
         }
     }
 }
@@ -185,6 +188,8 @@ pub struct Key {
     /// A stored picture filling the key, by its file name in the images folder.
     pub background: String,
     pub color: String,
+    /// The icon's colour, when the icon is a character. The same as `text_color` if empty.
+    pub icon_color: String,
     pub text_color: String,
     /// Pressing flips between two looks.
     pub toggle: bool,
@@ -1284,6 +1289,7 @@ mod tests {
             icon: String::new(),
             background: String::new(),
             color: String::new(),
+            icon_color: String::new(),
             text_color: String::new(),
             toggle: false,
             alt_title: String::new(),

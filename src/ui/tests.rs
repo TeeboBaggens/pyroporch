@@ -1138,7 +1138,7 @@ fn a_keys_look_follows_what_its_rules_found_and_never_outlives_a_failed_check() 
     let look = |harness: &Harness<'_, App>| {
         let app = harness.state();
         let key = app.ws.profiles["default"].pages[0].key_at(0, 1).unwrap();
-        let KeyLook { title, icon, color } = app.key_look(key);
+        let KeyLook { title, icon, color, .. } = app.key_look(key);
         (title, icon, color)
     };
 
@@ -1219,3 +1219,105 @@ fn rules_made_in_the_form_are_saved_with_the_key() {
     let (_, key) = status_key(&mut harness);
     assert_eq!(key.steps[0].settings["rules"], "green");
 }
+
+fn open_look(harness: &mut Harness<'_, App>, label: &str) {
+    harness.query_all_by_label(label).next().unwrap().click_accesskit();
+    settle(harness);
+}
+
+#[test]
+fn a_keys_colours_are_chosen_with_a_picker_typed_in_or_kept_as_favourites_for_any_key() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut harness = harness(&dir);
+    settle(&mut harness);
+    click(&mut harness, "API Status");
+
+    let color = |harness: &mut Harness<'_, App>| status_key(harness).1.color.clone();
+    let text_box = |harness: &Harness<'_, App>, wanted: &str| harness.query_all_by_role(Role::TextInput).any(|node| node.value().as_deref() == Some(wanted));
+
+    // A favourite is one click, with no numbers to know.
+    open_look(&mut harness, "Choose Background");
+    harness.get_by_label("Favourite #2E8B57").click_accesskit();
+    settle(&mut harness);
+    assert_eq!(color(&mut harness), "#2E8B57");
+    assert!(text_box(&harness, "#2E8B57"), "and the number is there for anyone who wants it");
+
+    // Typing one in only counts once it's a whole colour.
+    let field = harness.query_all_by_role(Role::TextInput).find(|node| node.value().as_deref() == Some("#2E8B57")).unwrap();
+    field.focus();
+    settle(&mut harness);
+    let field = harness.query_all_by_role(Role::TextInput).find(|node| node.value().as_deref() == Some("#2E8B57")).unwrap();
+    field.set_text_value_accesskit("#12");
+    settle(&mut harness);
+    assert_eq!(color(&mut harness), "#2E8B57", "not a colour yet");
+    let field = harness.query_all_by_role(Role::TextInput).find(|node| node.value().as_deref() == Some("#12")).unwrap();
+    field.set_text_value_accesskit("#123456");
+    settle(&mut harness);
+    assert_eq!(color(&mut harness), "#123456");
+
+    // Kept as a favourite, it's on offer for the icon too, and it's saved with the settings.
+    click(&mut harness, "☆ Add");
+    harness.get_by_label("Favourite #123456");
+    assert!(harness.state().ws.settings.ui.favorite_colors.contains(&"#123456".to_string()));
+    assert!(harness.state().dirty_settings.is_some());
+
+    // Right-clicking lets one go.
+    harness.get_by_label("Favourite #123456").click_secondary();
+    settle(&mut harness);
+    assert!(harness.query_by_label("Favourite #123456").is_none());
+    assert_eq!(color(&mut harness), "#123456", "the key keeps it");
+
+    click(&mut harness, "Default");
+    assert_eq!(color(&mut harness), "");
+}
+
+#[test]
+fn a_favourite_colour_is_kept_once_and_the_list_stays_a_sensible_size() {
+    let mut favorites = vec!["#112233".to_string()];
+    deck::add_favorite(&mut favorites, "#AABBCC");
+    deck::add_favorite(&mut favorites, "#aabbcc");
+    assert_eq!(favorites, ["#112233", "#AABBCC"]);
+    for shade in 0..64 {
+        deck::add_favorite(&mut favorites, &format!("#0000{shade:02X}"));
+    }
+    assert_eq!(favorites.len(), 32);
+    assert_eq!(favorites.last().unwrap(), "#00003F", "the newest stays");
+}
+
+#[test]
+fn a_keys_icon_colour_is_its_own_and_a_rule_can_change_it() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut harness = harness(&dir);
+    settle(&mut harness);
+    let (id, key) = status_key(&mut harness);
+    key.icon_color = "#FFFFFF".into();
+    let icon_color = |harness: &Harness<'_, App>| {
+        let app = harness.state();
+        app.key_look(app.ws.profiles["default"].pages[0].key_at(0, 1).unwrap()).icon_color
+    };
+    assert_eq!(icon_color(&harness), "#FFFFFF");
+    finish(&mut harness, &id, RunReport { ok: true, icon_color: Some("#FFD400".into()), ..RunReport::default() });
+    assert_eq!(icon_color(&harness), "#FFD400");
+    finish(&mut harness, &id, RunReport { ok: false, ..RunReport::default() });
+    assert_eq!(icon_color(&harness), "#FFFFFF");
+}
+
+#[test]
+fn the_icon_picker_shows_the_lantern_and_the_media_keys_rather_than_naming_them() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut harness = harness(&dir);
+    settle(&mut harness);
+    click(&mut harness, "API Status");
+    let pick = harness.query_all_by_label("Pick").next().unwrap();
+    pick.click_accesskit();
+    settle(&mut harness);
+    harness.get_by_label("⏮");
+    harness.get_by_label("⏭");
+    click(&mut harness, "Lantern gone out");
+    let (_, key) = status_key(&mut harness);
+    assert_eq!(key.icon, pyroporch_core::engine::SLEEP_ICON);
+    settle(&mut harness);
+    // Its name isn't put in front of the person to read or edit.
+    assert!(!harness.query_all_by_role(Role::TextInput).any(|node| node.value().is_some_and(|text| text.starts_with("builtin:"))));
+}
+

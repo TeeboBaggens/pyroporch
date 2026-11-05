@@ -28,6 +28,8 @@ accent = "#E8743B"
 scale = 1.0
 tray_icon = "color"      # or "white" or "black": the lantern in the menu bar or tray
 collapsed_groups = []    # groups folded away in the action list: a plugin id, "organize" or "presets"
+# colours kept for choosing again, on any key
+favorite_colors = ["#2F6FDB", "#0F8B8D", "#2E8B57", "#7A4FD0", "#A83279", "#B4532A", "#C0392B", "#B8860B", "#3A4252", "#14171C"]
 
 [security]
 auto_lock_minutes = 15   # 0 means never
@@ -113,6 +115,7 @@ A grid is 1 to 8 rows by 1 to 16 columns, and each key's `row` and `col` count f
 | `icon` | One character or emoji, or `builtin:lantern-out` for the lantern that's gone out |
 | `background` | A picture filling the key: see [Folders and pictures](#folders-and-pictures) |
 | `color`, `text_color` | Its background and title colours, like `#2F6FDB` |
+| `icon_color` | The colour of an icon that's a character. The same as `text_color` if left out |
 | `toggle` | Pressing flips between two looks |
 | `alt_title`, `alt_color` | The second look |
 | `steps` | What it does, with an `action`, its `settings` and a `delay_ms` for each |

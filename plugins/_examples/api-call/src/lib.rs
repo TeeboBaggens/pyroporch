@@ -109,6 +109,7 @@ impl Plugin for ApiCallPlugin {
             // The first rule that fits wins. If none does, the key keeps its own look.
             if let Some(rule) = rules.iter().find(|rule| rule.matches(&value)) {
                 outcome.icon = Some(rule.icon.clone()).filter(|icon| !icon.is_empty());
+                outcome.icon_color = Some(rule.icon_color.clone()).filter(|color| !color.is_empty());
                 outcome.color = Some(rule.color.clone()).filter(|color| !color.is_empty());
             }
         }
@@ -156,7 +157,7 @@ fn request_fields() -> Vec<Field> {
         Field::new("watch_value", "Watch", FieldKind::Text)
             .help("Which part of a JSON answer the rules look at, for example /status/indicator. Empty means the same as Show on key."),
         Field::new("rules", "Change the look when it", FieldKind::Rules)
-            .help("The first rule that fits sets the key's icon and colour. If none fits, it keeps its own."),
+            .help("The first rule that fits sets the key's icon, icon colour and background. If none fits, it keeps its own."),
         Field::new("refresh_seconds", "Refresh every (seconds)", FieldKind::Number)
             .help("0 means only when pressed, and 300 is every 5 minutes. GET requests only.")
             .default(0),
@@ -278,7 +279,7 @@ mod tests {
             {"when": "is", "value": "none", "icon": "✅", "color": "#2E8B57"},
             {"when": "is", "value": "minor", "color": "#B8860B"},
             {"when": "is", "value": "major", "color": "#B4532A"},
-            {"when": "is", "value": "critical", "icon": "🔥", "color": "#C0392B"},
+            {"when": "is", "value": "critical", "icon": "🔥", "icon_color": "#FFD400", "color": "#C0392B"},
         ])
     }
 
@@ -304,6 +305,7 @@ mod tests {
         });
         let outcome = ApiCallPlugin.run(&request(settings, Trigger::Press), &host).unwrap();
         assert_eq!(outcome.icon.as_deref(), Some("🔥"));
+        assert_eq!(outcome.icon_color.as_deref(), Some("#FFD400"));
     }
 
     #[test]

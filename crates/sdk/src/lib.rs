@@ -195,13 +195,14 @@ impl RuleTest {
 }
 
 /// One row of a [`FieldKind::Rules`] setting: when a value passes the test, the key takes this look.
-/// An empty `icon` or `color` leaves that part of the key as it is.
+/// An empty `icon`, `icon_color` or `color` leaves that part of the key as it is.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Rule {
     pub when: RuleTest,
     pub value: String,
     pub icon: String,
+    pub icon_color: String,
     pub color: String,
 }
 
@@ -286,6 +287,9 @@ pub struct Outcome {
     /// file: the app ignores anything that looks like a path.
     #[serde(default)]
     pub icon: Option<String>,
+    /// A colour like `#FFFFFF` for the key's icon, until the next run.
+    #[serde(default)]
+    pub icon_color: Option<String>,
     /// A colour like `#2E8B57` to show on the key instead of its own, until the next run.
     #[serde(default)]
     pub color: Option<String>,
