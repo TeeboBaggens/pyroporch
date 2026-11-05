@@ -93,16 +93,18 @@ impl Plugin for DesktopActions {
             }
             "hotkey" | "press_key" => {
                 let keys = request.text("keys");
-                press_combo(keys)?;
+                on_keyboard_thread(|| press_combo(keys))?;
                 Ok(Outcome::message(format!("pressed {keys}")))
             }
             "media" => {
                 let name = request.text("key");
-                tap(media_key(name)?)?;
+                let key = media_key(name)?;
+                on_keyboard_thread(|| tap(key))?;
                 Ok(Outcome::message(format!("media key: {name}")))
             }
             "type_text" => {
-                input()?.text(request.text("text")).map_err(|e| e.to_string())?;
+                let text = request.text("text");
+                on_keyboard_thread(|| input()?.text(text).map_err(|e| e.to_string()))?;
                 Ok(Outcome::message("typed text"))
             }
             "run_command" => {
@@ -123,6 +125,35 @@ impl Plugin for DesktopActions {
             }
             other => Err(format!("unknown action: {other}")),
         }
+    }
+}
+
+/// Runs keyboard work where the system allows it. On a Mac, looking up the keyboard layout from any
+/// thread but the main one ends the program, and a key runs on a thread of its own. The main thread
+/// has to be free to take this on: the window's event loop, or [`serve_main_thread`].
+#[cfg(target_os = "macos")]
+pub fn on_keyboard_thread<R: Send>(work: impl FnOnce() -> R + Send) -> R {
+    dispatch2::run_on_main(|_| work())
+}
+
+/// Runs keyboard work where the system allows it, which on this system is anywhere.
+#[cfg(not(target_os = "macos"))]
+pub fn on_keyboard_thread<R: Send>(work: impl FnOnce() -> R + Send) -> R {
+    work()
+}
+
+/// Gives the main thread over to [`on_keyboard_thread`], for a program with no window to do that.
+/// It never returns, so whatever the program is for has to run on another thread, and end it.
+#[cfg(target_os = "macos")]
+pub fn serve_main_thread() -> ! {
+    #[link(name = "CoreFoundation", kind = "framework")]
+    unsafe extern "C" {
+        fn CFRunLoopRun();
+    }
+    loop {
+        // This only returns if something stops it, and nothing here does.
+        unsafe { CFRunLoopRun() };
+        std::thread::sleep(std::time::Duration::from_millis(100));
     }
 }
 
