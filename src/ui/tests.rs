@@ -1344,3 +1344,106 @@ fn text_pasted_into_an_api_key_lands_in_its_settings() {
     assert!(key.steps[0].settings["url"].as_str().unwrap().contains("?pasted=1"));
 }
 
+fn page_names(harness: &Harness<'_, App>) -> Vec<String> {
+    harness.state().profile().unwrap().pages.iter().map(|page| page.name.clone()).collect()
+}
+
+#[test]
+fn deleting_a_page_asks_first_says_what_goes_and_can_be_undone() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut harness = harness(&dir);
+    settle(&mut harness);
+    let names = page_names(&harness);
+    assert!(names.len() > 1);
+    let keys = harness.state().profile().unwrap().pages[0].keys.len();
+
+    click(&mut harness, "Delete page");
+    assert_eq!(page_names(&harness), names, "nothing goes yet");
+    harness.get_by_label_contains(&format!("Delete the page \"{}\"", names[0]));
+    harness.get_by_label_contains(&format!("All {keys} keys"));
+
+    click(&mut harness, "Keep page");
+    assert_eq!(page_names(&harness), names);
+    assert!(harness.query_by_label("Yes, delete this page").is_none());
+
+    click(&mut harness, "Delete page");
+    click(&mut harness, "Yes, delete this page");
+    assert_eq!(page_names(&harness), names[1..]);
+    assert!(harness.query_by_label("Yes, delete this page").is_none());
+    assert_eq!(harness.state().page, 0);
+
+    click(&mut harness, "↩ Undo");
+    assert_eq!(page_names(&harness), names);
+    assert_eq!(harness.state().profile().unwrap().pages[0].keys.len(), keys, "with its keys");
+    assert!(harness.state().active_has_changes(), "and it gets saved like any change");
+}
+
+#[test]
+fn undo_goes_back_a_step_at_a_time_and_keeps_each_profile_apart() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut harness = harness(&dir);
+    settle(&mut harness);
+    assert!(!harness.state().can_undo(), "nothing to take back yet");
+    let title = |harness: &mut Harness<'_, App>, text: &str| {
+        status_key(harness).1.title = text.into();
+        settle(harness);
+        // The next change is a step of its own, rather than part of the same burst of typing.
+        harness.state_mut().undo.last_change = None;
+    };
+    title(&mut harness, "First");
+    title(&mut harness, "Second");
+    assert!(harness.state().can_undo());
+
+    harness.state_mut().undo();
+    settle(&mut harness);
+    assert_eq!(status_key(&mut harness).1.title, "First");
+    harness.key_press_modifiers(egui::Modifiers::COMMAND, egui::Key::Z);
+    settle(&mut harness);
+    assert_eq!(status_key(&mut harness).1.title, "API Status");
+    assert!(!harness.state().can_undo());
+
+    // Another profile has a history of its own, and the first one's is still there afterwards.
+    title(&mut harness, "Third");
+    let other = harness.state_mut().ws.add_unsaved_profile(Profile { name: "Other".into(), ..Profile::default() }).unwrap();
+    harness.state_mut().switch_profile(other);
+    settle(&mut harness);
+    assert!(!harness.state().can_undo());
+    harness.state_mut().switch_profile("default".into());
+    settle(&mut harness);
+    assert!(harness.state().can_undo());
+    harness.state_mut().undo();
+    settle(&mut harness);
+    assert_eq!(status_key(&mut harness).1.title, "API Status");
+}
+
+#[test]
+fn changes_in_quick_succession_are_one_step() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut harness = harness(&dir);
+    settle(&mut harness);
+    for text in ["a", "ab", "abc"] {
+        status_key(&mut harness).1.title = text.into();
+        settle(&mut harness);
+    }
+    assert_eq!(harness.state().undo.steps["default"].len(), 1);
+    harness.state_mut().undo();
+    settle(&mut harness);
+    assert_eq!(status_key(&mut harness).1.title, "API Status");
+}
+
+#[test]
+fn the_undo_shortcut_leaves_a_text_box_to_its_own_undo() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut harness = harness(&dir);
+    settle(&mut harness);
+    status_key(&mut harness).1.title = "Changed".into();
+    settle(&mut harness);
+    click(&mut harness, "Changed");
+    harness.get_by_role_and_label(Role::TextInput, "Title").focus();
+    settle(&mut harness);
+    harness.key_press_modifiers(egui::Modifiers::COMMAND, egui::Key::Z);
+    settle(&mut harness);
+    assert_eq!(status_key(&mut harness).1.title, "Changed");
+    assert!(harness.state().can_undo());
+}
+

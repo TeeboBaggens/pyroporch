@@ -252,6 +252,9 @@ impl App {
                 profile.cols = c;
                 self.mark_profile_dirty();
             }
+            if ui.add_enabled(self.can_undo(), egui::Button::new("↩ Undo")).on_hover_text("Take back the last change to this profile").clicked() {
+                self.undo();
+            }
 
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 if let Some((r, c)) = self.deck_shape
@@ -328,16 +331,66 @@ impl App {
                 }
             }
             if names.len() > 1 && ui.small_button("Delete page").clicked() {
-                let page = self.page;
-                if let Some(profile) = self.profile_mut() {
-                    profile.pages.remove(page);
-                }
-                self.page = page.saturating_sub(1);
-                self.selected = None;
-                self.draft = None;
-                self.mark_profile_dirty();
+                self.confirm_delete_page = Some(self.page);
             }
         });
+    }
+
+    /// Asks before a page goes, as it can hold a lot of work, with folders full of keys in it.
+    pub fn delete_page_window(&mut self, ctx: &egui::Context) {
+        let Some(index) = self.confirm_delete_page else {
+            return;
+        };
+        let Some(page) = self.profile().and_then(|profile| profile.pages.get(index)) else {
+            self.confirm_delete_page = None;
+            return;
+        };
+        let (name, keys) = (page.name.clone(), page.keys.len());
+        let p = self.palette();
+        let mut delete = false;
+        let mut keep = false;
+        let modal = egui::Modal::new(egui::Id::unique("delete_page_dialog")).show(ctx, |ui| {
+            ui.set_width(440.0);
+            ui.label(RichText::new(format!("⚠ Delete the page \"{name}\"?")).heading().strong().color(p.bad));
+            ui.add_space(6.0);
+            let holds = match keys {
+                0 => "It has no keys on it.".to_string(),
+                1 => "The 1 key on it goes with it, along with anything inside.".to_string(),
+                keys => format!("All {keys} keys on it go with it, along with anything inside folders."),
+            };
+            ui.label(holds);
+            ui.label(RichText::new("Undo can bring it back until the app closes. After that, it's gone for good.").small().color(p.muted));
+            ui.add_space(10.0);
+            ui.horizontal(|ui| {
+                if ui.add(egui::Button::new(RichText::new("Yes, delete this page").strong().color(Color32::WHITE)).fill(p.bad)).clicked() {
+                    delete = true;
+                }
+                if ui.button("Keep page").clicked() {
+                    keep = true;
+                }
+            });
+        });
+        if delete {
+            self.delete_page(index);
+        }
+        if delete || keep || modal.should_close() {
+            self.confirm_delete_page = None;
+        }
+    }
+
+    fn delete_page(&mut self, index: usize) {
+        let Some(profile) = self.profile_mut() else {
+            return;
+        };
+        if profile.pages.len() < 2 {
+            return;
+        }
+        profile.pages.remove(index);
+        if self.page >= index {
+            self.page = self.page.saturating_sub(1);
+        }
+        self.leave_all_folders();
+        self.mark_profile_dirty();
     }
 
     /// Every key dark, or playing the screen saver. Clicking any of them wakes the deck, and does
