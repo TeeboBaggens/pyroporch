@@ -1,7 +1,7 @@
 # A plugin is one folder holding this file and the plugin's built code.
 id = "pyroporch.screensaver"
 name = "Screen Saver"
-version = "0.2.0"
+version = "0.2.1"
 description = "Animations on the keys, started by a key press or after a quiet spell."
 wasm = "plugin.wasm"
 

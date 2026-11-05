@@ -1321,3 +1321,26 @@ fn the_icon_picker_shows_the_lantern_and_the_media_keys_rather_than_naming_them(
     assert!(!harness.query_all_by_role(Role::TextInput).any(|node| node.value().is_some_and(|text| text.starts_with("builtin:"))));
 }
 
+#[test]
+fn the_clipboard_is_switched_on_as_without_it_no_text_box_can_paste() {
+    // Nothing here can see this go wrong, because only the real window reads the system's clipboard.
+    let manifest = include_str!("../../Cargo.toml");
+    let eframe = manifest.lines().find(|line| line.starts_with("eframe")).unwrap();
+    assert!(eframe.contains("\"clipboard\""), "{eframe}");
+}
+
+#[test]
+fn text_pasted_into_an_api_key_lands_in_its_settings() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut harness = harness(&dir);
+    settle(&mut harness);
+    click(&mut harness, "API Status");
+    let field = harness.query_all_by_role(Role::TextInput).find(|node| node.value().as_deref() == Some("https://api.github.com/zen")).unwrap();
+    field.focus();
+    settle(&mut harness);
+    harness.input_mut().events.push(egui::Event::Paste("?pasted=1".into()));
+    settle(&mut harness);
+    let (_, key) = status_key(&mut harness);
+    assert!(key.steps[0].settings["url"].as_str().unwrap().contains("?pasted=1"));
+}
+
