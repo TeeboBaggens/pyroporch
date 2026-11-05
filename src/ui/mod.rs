@@ -35,6 +35,10 @@ const SCREENSHOT_FRAMES: u32 = 120;
 const SCREENSHOT_TIMEOUT: Duration = Duration::from_secs(90);
 const SAVE_DELAY: Duration = Duration::from_millis(400);
 const ACTIVITY_LINES: usize = 60;
+/// Changes this close together count as one step for undo.
+const UNDO_GROUP_WITHIN: Duration = Duration::from_secs(1);
+/// How many steps back undo can go, for each profile.
+const MAX_UNDO_STEPS: usize = 100;
 /// The longest a key may ask to be refreshed after. A day is plenty, and it keeps the number
 /// well inside what a clock can hold.
 const MAX_REFRESH_SECONDS: f64 = 86_400.0;
@@ -97,6 +101,18 @@ pub struct VaultForm {
     pub is_error: bool,
 }
 
+/// Earlier states of each profile this session, so a change can be taken back.
+#[derive(Default)]
+struct UndoHistory {
+    /// The profile as it was last seen, with its id.
+    seen: Option<(String, Profile)>,
+    /// Oldest first, for each profile.
+    steps: HashMap<String, Vec<Profile>>,
+    /// When the last change was made, as typing a word shouldn't take a step per letter. Nothing
+    /// here means the next change starts a step of its own.
+    last_change: Option<Instant>,
+}
+
 /// What a key's last run asked it to show, in place of its own look.
 #[derive(Default)]
 pub struct LiveLook {
@@ -156,6 +172,9 @@ pub struct App {
     pub vault_form: VaultForm,
     pub new_profile_name: Option<String>,
     pub new_page_name: Option<String>,
+    /// A page waiting for the person to say yes before it goes.
+    pub confirm_delete_page: Option<usize>,
+    undo: UndoHistory,
     pub show_requests: bool,
     pub pending: Pending,
     pub grants: Grants,
@@ -267,6 +286,8 @@ impl App {
             vault_form: VaultForm::default(),
             new_profile_name: None,
             new_page_name: None,
+            confirm_delete_page: None,
+            undo: UndoHistory::default(),
             show_requests: false,
             pending,
             grants,
@@ -393,6 +414,56 @@ impl App {
         self.selected = None;
         self.draft = None;
         self.confirm_remove = None;
+    }
+
+    /// Notices a change to the active profile, however it was made, and keeps what came before.
+    fn track_changes(&mut self) {
+        let id = self.active_id();
+        let Some(profile) = self.ws.profiles.get(&id) else {
+            return;
+        };
+        let history = &mut self.undo;
+        match &mut history.seen {
+            Some((seen_id, seen)) if *seen_id == id => {
+                if seen != profile {
+                    let previous = std::mem::replace(seen, profile.clone());
+                    let new_step = history.last_change.is_none_or(|at| at.elapsed() >= UNDO_GROUP_WITHIN);
+                    let steps = history.steps.entry(id).or_default();
+                    if new_step || steps.is_empty() {
+                        steps.push(previous);
+                        let extra = steps.len().saturating_sub(MAX_UNDO_STEPS);
+                        steps.drain(..extra);
+                    }
+                    history.last_change = Some(Instant::now());
+                }
+            }
+            seen => {
+                *seen = Some((id, profile.clone()));
+                history.last_change = None;
+            }
+        }
+    }
+
+    pub fn can_undo(&self) -> bool {
+        self.undo.steps.get(&self.active_id()).is_some_and(|steps| !steps.is_empty())
+    }
+
+    /// Puts the active profile back as it was before its last change.
+    pub fn undo(&mut self) {
+        self.track_changes();
+        let id = self.active_id();
+        let Some(previous) = self.undo.steps.get_mut(&id).and_then(Vec::pop) else {
+            return;
+        };
+        self.undo.seen = Some((id.clone(), previous.clone()));
+        self.undo.last_change = None;
+        self.ws.profiles.insert(id, previous);
+        if self.profile().is_some_and(|profile| self.page >= profile.pages.len()) {
+            self.page = 0;
+        }
+        self.leave_all_folders();
+        self.mark_profile_dirty();
+        self.log(true, "undid the last change");
     }
 
     pub fn mark_profile_dirty(&mut self) {
@@ -1037,6 +1108,12 @@ impl App {
             ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
             self.hide_window(&ctx);
         }
+        self.track_changes();
+        // A text box being typed in has its own undo for the same keys.
+        let free_to_undo = self.view == View::Deck && !self.use_mode && self.confirm_delete_page.is_none() && ui.ctx().memory(|memory| memory.focused().is_none());
+        if free_to_undo && ui.input_mut(|input| input.consume_key(egui::Modifiers::COMMAND, egui::Key::Z)) {
+            self.undo();
+        }
         self.top_bar(ui);
         match self.view {
             View::Deck => self.deck_view(ui),
@@ -1049,6 +1126,7 @@ impl App {
         self.secret_window(&ctx);
         self.crop_window(&ctx);
         self.import_window(&ctx);
+        self.delete_page_window(&ctx);
         self.screenshot_step(&ctx);
     }
 
