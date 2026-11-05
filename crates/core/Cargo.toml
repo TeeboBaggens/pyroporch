@@ -1,0 +1,37 @@
+[package]
+name = "pyroporch-core"
+description = "Pyro Porch without a window: config, vault, policy, plugin host, action engine and MCP server."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[features]
+default = []
+os-keychain = ["dep:keyring"]
+
+[dependencies]
+pyroporch-sdk.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+# The versions below are the latest stable releases on crates.io, checked 2026-11-03.
+toml = "1.2.0"
+dirs = "7.0.0"
+url = "2.5.8"
+ureq = "3.5.1"
+# Portable dispatch works in every kind of build. The faster default depends on tail calls that
+# aren't guaranteed, and overflows the stack without them. Latest stable, checked 2026-11-03.
+wasmi = { version = "2.0.0", features = ["portable-dispatch"] }
+chacha20poly1305 = "0.11.0"
+argon2 = "0.6.0"
+sha2 = "0.11.1"
+zeroize = "1.9.1"
+getrandom = "0.4.3"
+base64 = "0.23.1"
+keyring = { version = "4.2.0", optional = true }
+
+[target.'cfg(unix)'.dependencies]
+# libc 0.2.x is the latest stable line (1.0 is still an alpha), checked 2026-11-03.
+libc = "0.2.191"
+
+[dev-dependencies]
+tempfile = "3.27.0"

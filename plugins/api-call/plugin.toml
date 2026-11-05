@@ -1,0 +1,12 @@
+# A plugin is one folder holding this file and the plugin's built code.
+id = "pyroporch.api-call"
+name = "API Calls"
+version = "0.1.0"
+description = "Call a web API when a key is pressed, and show the answer on the key."
+wasm = "plugin.wasm"
+
+[permissions]
+# No sites up front: the app asks you about each one the first time a key needs it.
+http_hosts = []
+# Any secret you choose for a key. Each one still only goes to the sites you listed for it.
+secrets = ["*"]

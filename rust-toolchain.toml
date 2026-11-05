@@ -1,0 +1,6 @@
+# Rust 1.99.1: the latest stable release (Rust has no LTS track), checked 2026-11-03.
+[toolchain]
+channel = "1.99.1"
+# rust-src: the built plugins record where the standard library is, so it has to be the same everywhere.
+components = ["clippy", "rustfmt", "rust-src"]
+targets = ["wasm32-unknown-unknown"]

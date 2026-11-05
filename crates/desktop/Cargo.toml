@@ -1,0 +1,13 @@
+[package]
+name = "pyroporch-desktop"
+description = "The Desktop actions, built as part of the app: open links and apps, hotkeys, media keys, typed text, commands."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+pyroporch-sdk.workspace = true
+# The versions below are the latest stable releases on crates.io, checked 2026-11-03.
+enigo = "0.6.1"
+open = "5.4.5"
+url = "2.5.8"

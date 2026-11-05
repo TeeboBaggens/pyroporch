@@ -1,0 +1,10 @@
+[package]
+name = "pyroporch-sdk"
+description = "Everything a Pyro Porch plugin needs: the Plugin trait, the Host trait and the sandbox glue."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+serde.workspace = true
+serde_json.workspace = true
