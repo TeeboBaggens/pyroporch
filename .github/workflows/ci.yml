@@ -1,10 +1,19 @@
 # Builds and tests on all three platforms. Rust itself comes from rust-toolchain.toml.
 name: CI
 
+# Skips changes that can't affect the app. The guides in docs/ and plugins/README.md still run this,
+# because they're built into the app and tests check them against it.
 on:
   push:
     branches: [main]
+    paths-ignore: &not-the-app
+      - README.md
+      - LICENSE-*
+      - .gitignore
+      - .github/workflows/codeql.yml
+      - .github/workflows/release.yml
   pull_request:
+    paths-ignore: *not-the-app
 
 permissions:
   contents: read
