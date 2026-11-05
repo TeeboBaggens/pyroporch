@@ -1447,3 +1447,47 @@ fn the_undo_shortcut_leaves_a_text_box_to_its_own_undo() {
     assert!(harness.state().can_undo());
 }
 
+/// Types a name into the box that opens by itself, and presses a key to finish.
+fn name_it(harness: &mut Harness<'_, App>, name: &str, finish: egui::Key) {
+    settle(harness);
+    harness.input_mut().events.push(egui::Event::Text(name.into()));
+    settle(harness);
+    harness.key_press(finish);
+    settle(harness);
+}
+
+#[test]
+fn a_new_page_is_named_and_made_with_return_and_escape_thinks_better_of_it() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut harness = harness(&dir);
+    settle(&mut harness);
+    let before = page_names(&harness);
+
+    click(&mut harness, "+");
+    name_it(&mut harness, "Work", egui::Key::Enter);
+    assert_eq!(page_names(&harness).last().unwrap(), "Work");
+    assert_eq!(harness.state().page, before.len(), "and it's the page on screen");
+    assert!(harness.state().new_page_name.is_none(), "the box has gone");
+
+    click(&mut harness, "+");
+    name_it(&mut harness, "Not this", egui::Key::Escape);
+    assert_eq!(page_names(&harness).len(), before.len() + 1);
+    assert!(harness.state().new_page_name.is_none());
+
+    // No name, so nothing to make yet.
+    click(&mut harness, "+");
+    name_it(&mut harness, "   ", egui::Key::Enter);
+    assert_eq!(page_names(&harness).len(), before.len() + 1);
+}
+
+#[test]
+fn a_new_profile_is_named_and_made_with_return() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut harness = harness(&dir);
+    settle(&mut harness);
+    click(&mut harness, "+ Profile");
+    name_it(&mut harness, "Studio", egui::Key::Enter);
+    assert_eq!(harness.state().profile().unwrap().name, "Studio");
+    assert!(harness.state().new_profile_name.is_none());
+}
+
