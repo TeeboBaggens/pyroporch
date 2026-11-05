@@ -154,12 +154,14 @@ fn run_tool(tool: &Path, args: &[&std::ffi::OsStr]) -> Result<(), String> {
 /// Opens the checked package, with the same tool that keeps a Mac app's signature whole when packing it.
 fn unpack(package: &Path, folder: &Path) -> Result<(), String> {
     #[cfg(target_os = "macos")]
-    return run_tool(Path::new("/usr/bin/ditto"), &["-x".as_ref(), "-k".as_ref(), package.as_os_str(), folder.as_os_str()]);
+    {
+        run_tool(Path::new("/usr/bin/ditto"), &["-x".as_ref(), "-k".as_ref(), package.as_os_str(), folder.as_os_str()])
+    }
     #[cfg(target_os = "windows")]
     {
         let system = std::env::var_os("SystemRoot").ok_or("couldn't find the Windows folder")?;
         let tar = Path::new(&system).join("System32").join("tar.exe");
-        return run_tool(&tar, &["-xf".as_ref(), package.as_os_str(), "-C".as_ref(), folder.as_os_str()]);
+        run_tool(&tar, &["-xf".as_ref(), package.as_os_str(), "-C".as_ref(), folder.as_os_str()])
     }
     #[cfg(not(any(target_os = "macos", target_os = "windows")))]
     {
