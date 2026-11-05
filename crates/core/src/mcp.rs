@@ -1048,7 +1048,7 @@ impl McpServer {
                 message = format!("brightness {brightness}%");
             }
         }
-        Ok(json!({"ok": report.ok, "message": message, "title": report.title}))
+        Ok(json!({"ok": report.ok, "message": message, "title": report.title, "icon": report.icon, "color": report.color}))
     }
 
     #[cfg(feature = "os-keychain")]

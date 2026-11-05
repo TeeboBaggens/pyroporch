@@ -72,17 +72,67 @@ A sample plugin. Sends a web request. See [SECURITY.md](SECURITY.md) for how its
 |---|---|
 | `url` | *Required.* The address to call. The person allows each site the first time |
 | `method` | `GET`, `POST`, `PUT`, `PATCH` or `DELETE`. `GET` if left out |
-| `auth` | `none`, `bearer token`, `basic` or `api key header`. `none` if left out |
-| `secret` | The credential for `auth`, as a `{{secret:name}}` reference |
+| `auth` | `none`, `bearer token`, `basic` or `api key header`. `none` if left out, which sends no credentials, for a public API |
+| `secret` | The credential for `auth`, as a `{{secret:name}}` reference. Not needed for `none` |
 | `username` | For `basic` |
 | `key_header` | For `api key header`. `X-Api-Key` if left out |
 | `headers` | Extra headers, as names and values |
 | `body` | What to send. Goes as JSON unless `headers` sets a `Content-Type` |
 | `show_value` | Which part of a JSON answer to show on the key, like `/data/temperature` |
-| `refresh_seconds` | Re-runs on this timer while its page is on screen, for `GET` only. 0 if left out, which means only when pressed |
+| `watch_value` | Which part of a JSON answer `rules` looks at, like `/status/indicator`. The same as `show_value` if left out |
+| `rules` | Changes the key's icon and colour by that value: see [Changing the look by the answer](#changing-the-look-by-the-answer) |
+| `refresh_seconds` | Re-runs on this timer while its page is on screen, for `GET` only. 300 is every 5 minutes. 0 if left out, which means only when pressed |
 | `timeout_seconds` | Gives up after this long. 15 if left out |
 
 A status outside the 200s counts as a failure.
+
+### Changing the look by the answer
+
+This key checks GitHub's public status every 5 minutes, and needs no credentials:
+
+```toml
+[pages.keys.steps.settings]
+url = "https://www.githubstatus.com/api/v2/status.json"
+watch_value = "/status/indicator"
+show_value = "/status/description"
+refresh_seconds = 300
+
+[[pages.keys.steps.settings.rules]]
+when = "is"
+value = "none"
+icon = "✅"
+color = "#2E8B57"
+
+[[pages.keys.steps.settings.rules]]
+when = "is"
+value = "minor"
+icon = "⚠"
+color = "#B8860B"
+
+[[pages.keys.steps.settings.rules]]
+when = "is"
+value = "major"
+icon = "⚠"
+color = "#B4532A"
+
+[[pages.keys.steps.settings.rules]]
+when = "is"
+value = "critical"
+icon = "🔥"
+color = "#C0392B"
+```
+
+Each rule has these, and the first one that fits wins:
+
+| Part | What it does |
+|---|---|
+| `when` | `is`, `is not`, `contains`, `above`, `below` or `anything else`. `above` and `below` compare numbers. `anything else` belongs last, to catch what the others didn't |
+| `value` | What to compare with. Capitals don't count |
+| `icon` | One character or emoji to show, not a file. The key's own if left out |
+| `color` | The colour to show, like `#2E8B57`. The key's own if left out |
+
+The key goes back to its own look when no rule fits, and when a call fails, so an old answer never passes for a
+current one. A picture on the key covers its icon and colour, so a key with rules is best without one.
 
 ## Screen Saver
 

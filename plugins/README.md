@@ -224,6 +224,7 @@ Each field is one setting in the form. `Field::new(key, label, kind)` makes one,
 | `.default(value)` | What the form starts with |
 | `.required()` | The key won't run, and an assistant can't save it, until this has a value |
 | `.visible_when("other_key", "value")` | Only shows the field when another field has this value |
+| `.hidden_when("other_key", "value")` | Hides the field when another field has this value, or starts out with it |
 
 | `FieldKind` | The form shows | The setting holds | Read it with |
 |---|---|---|---|
@@ -237,6 +238,7 @@ Each field is one setting in the form. `Field::new(key, label, kind)` makes one,
 | `Secret` | A masked field that stores into the vault | Only ever a `{{secret:name}}` reference | `request.text("key")` |
 | `Hotkey` | A key recorder | Text, like `ctrl+shift+m` | `request.text("key")` |
 | `KeyValues` | Rows of names and values | Name and value pairs. Values can hold references | `request.pairs("key")` |
+| `Rules` | Rows of a test, a value, an icon and a colour | A list of `Rule`s. Use `rule.matches(value)` to test one | `request.rules("key")?` |
 
 Three things to allow for:
 
@@ -268,6 +270,8 @@ has several steps, the rest don't run. Write it for the person reading it. A suc
 |---|---|
 | `message` | A short line for the activity list. `Outcome::message("done")` makes one with only this |
 | `title` | New text for the key, for live values. If several steps set one, the last wins |
+| `icon` | A character or emoji for the key to show instead of its own, until its next run. Anything like a file path is ignored |
+| `color` | A colour like `#2E8B57` for the key to show instead of its own, until its next run |
 | `navigate` | Moves the deck: `Navigate::NextPage`, `PreviousPage`, `Page("name")` or `Profile("id")` |
 | `deck` | Changes the deck: `DeckControl::Sleep`, `SetBrightness(percent)`, `Brighter(step)`, `Dimmer(step)` or `ScreenSaver(timing)`. Ignored unless the plugin was approved with `deck = true` |
 

@@ -94,7 +94,23 @@ impl Plugin for ApiCallPlugin {
         let mut outcome = Outcome::message(format!("{method} answered {}", response.status));
         let pointer = request.text("show_value");
         if !pointer.is_empty() {
-            outcome.title = Some(pick_value(&response.body, pointer)?);
+            outcome.title = Some(pick_value(&response.body, pointer)?.chars().take(MAX_TITLE_CHARS).collect());
+        }
+        let rules = request.rules("rules")?;
+        if !rules.is_empty() {
+            let watched = match request.text("watch_value") {
+                "" => pointer,
+                watched => watched,
+            };
+            if watched.is_empty() {
+                return Err("choose which part of the answer the rules watch".into());
+            }
+            let value = pick_value(&response.body, watched)?;
+            // The first rule that fits wins. If none does, the key keeps its own look.
+            if let Some(rule) = rules.iter().find(|rule| rule.matches(&value)) {
+                outcome.icon = Some(rule.icon.clone()).filter(|icon| !icon.is_empty());
+                outcome.color = Some(rule.color.clone()).filter(|color| !color.is_empty());
+            }
         }
         Ok(outcome)
     }
@@ -127,7 +143,8 @@ fn request_fields() -> Vec<Field> {
         .default("none"),
         // A Secret field: masked in the UI, stored in the vault, only a reference in the config.
         Field::new("secret", "Key or password", FieldKind::Secret)
-            .help("Kept encrypted in the vault, and only sent to the sites you allow for it."),
+            .help("Kept encrypted in the vault, and only sent to the sites you allow for it.")
+            .hidden_when("auth", "none"),
         Field::new("username", "Username", FieldKind::Text).visible_when("auth", "basic"),
         Field::new("key_header", "Header name", FieldKind::Text)
             .default("X-Api-Key")
@@ -136,8 +153,12 @@ fn request_fields() -> Vec<Field> {
         Field::new("body", "Body", FieldKind::MultiLine),
         Field::new("show_value", "Show on key", FieldKind::Text)
             .help("Which part of a JSON answer to show, for example /data/temperature"),
+        Field::new("watch_value", "Watch", FieldKind::Text)
+            .help("Which part of a JSON answer the rules look at, for example /status/indicator. Empty means the same as Show on key."),
+        Field::new("rules", "Change the look when it", FieldKind::Rules)
+            .help("The first rule that fits sets the key's icon and colour. If none fits, it keeps its own."),
         Field::new("refresh_seconds", "Refresh every (seconds)", FieldKind::Number)
-            .help("0 means only when pressed. GET requests only.")
+            .help("0 means only when pressed, and 300 is every 5 minutes. GET requests only.")
             .default(0),
         Field::new("timeout_seconds", "Give up after (seconds)", FieldKind::Number).default(15),
     ]
@@ -183,7 +204,7 @@ fn pick_value(body: &str, pointer: &str) -> Result<String, String> {
         Value::String(text) => text.clone(),
         other => other.to_string(),
     };
-    Ok(text.chars().take(MAX_TITLE_CHARS).collect())
+    Ok(text)
 }
 
 export_plugin!(ApiCallPlugin);
@@ -250,6 +271,90 @@ mod tests {
         let settings = serde_json::json!({"url": "https://a.example/x", "show_value": "/data/temp"});
         let outcome = ApiCallPlugin.run(&request(settings, Trigger::Press), &host).unwrap();
         assert_eq!(outcome.title.as_deref(), Some("21.5"));
+    }
+
+    fn status_rules() -> Value {
+        serde_json::json!([
+            {"when": "is", "value": "none", "icon": "✅", "color": "#2E8B57"},
+            {"when": "is", "value": "minor", "color": "#B8860B"},
+            {"when": "is", "value": "major", "color": "#B4532A"},
+            {"when": "is", "value": "critical", "icon": "🔥", "color": "#C0392B"},
+        ])
+    }
+
+    #[test]
+    fn the_first_rule_that_fits_sets_the_look_and_what_is_shown_can_differ_from_what_is_watched() {
+        let body = r#"{"status":{"indicator":"major","description":"Partial System Outage"}}"#;
+        let (_, host) = fake(200, body);
+        let settings = serde_json::json!({
+            "url": "https://a.example/x", "show_value": "/status/description",
+            "watch_value": "/status/indicator", "rules": status_rules(),
+        });
+        let outcome = ApiCallPlugin.run(&request(settings, Trigger::Refresh), &host).unwrap();
+        assert_eq!(outcome.title.as_deref(), Some("Partial System Outage"));
+        assert_eq!(outcome.color.as_deref(), Some("#B4532A"));
+        assert_eq!(outcome.icon, None, "this rule leaves the icon alone");
+    }
+
+    #[test]
+    fn rules_watch_what_is_shown_unless_told_otherwise() {
+        let (_, host) = fake(200, r#"{"status":{"indicator":"critical"}}"#);
+        let settings = serde_json::json!({
+            "url": "https://a.example/x", "show_value": "/status/indicator", "rules": status_rules(),
+        });
+        let outcome = ApiCallPlugin.run(&request(settings, Trigger::Press), &host).unwrap();
+        assert_eq!(outcome.icon.as_deref(), Some("🔥"));
+    }
+
+    #[test]
+    fn a_value_no_rule_fits_leaves_the_key_its_own_look() {
+        let (_, host) = fake(200, r#"{"status":{"indicator":"maintenance"}}"#);
+        let settings = serde_json::json!({
+            "url": "https://a.example/x", "watch_value": "/status/indicator", "rules": status_rules(),
+        });
+        let outcome = ApiCallPlugin.run(&request(settings, Trigger::Press), &host).unwrap();
+        assert_eq!((outcome.icon, outcome.color), (None, None));
+    }
+
+    #[test]
+    fn rules_that_cant_work_say_so() {
+        let (_, host) = fake(200, r#"{"a":1}"#);
+        let run = |extra: Value| {
+            let mut settings = serde_json::json!({"url": "https://a.example/x"});
+            settings.as_object_mut().unwrap().extend(extra.as_object().unwrap().clone());
+            ApiCallPlugin.run(&request(settings, Trigger::Press), &host).unwrap_err()
+        };
+        let rule = serde_json::json!([{"when": "is", "value": "1"}]);
+        assert!(run(serde_json::json!({"rules": rule})).contains("which part"));
+        assert!(run(serde_json::json!({"rules": rule, "watch_value": "/nope"})).contains("nothing at /nope"));
+        assert!(run(serde_json::json!({"rules": "green", "watch_value": "/a"})).contains("can't read the rules"));
+        assert!(run(serde_json::json!({"rules": [{"when": "sort of"}], "watch_value": "/a"})).contains("can't read the rules"));
+    }
+
+    #[test]
+    fn a_public_api_needs_no_credentials() {
+        let (fake, host) = fake(200, "{}");
+        for auth in [None, Some("none")] {
+            let mut settings = serde_json::json!({"url": "https://a.example/x"});
+            if let Some(auth) = auth {
+                settings["auth"] = auth.into();
+            }
+            ApiCallPlugin.run(&request(settings, Trigger::Press), &host).unwrap();
+        }
+        assert!(fake.sent.lock().unwrap().iter().all(|sent| sent.headers.is_empty()));
+    }
+
+    #[test]
+    fn a_long_value_is_shortened_for_the_key_but_not_for_the_rules() {
+        let long = "x".repeat(30);
+        let (_, host) = fake(200, &format!(r#"{{"a":"{long}"}}"#));
+        let settings = serde_json::json!({
+            "url": "https://a.example/x", "show_value": "/a",
+            "rules": [{"when": "is", "value": long, "color": "#112233"}],
+        });
+        let outcome = ApiCallPlugin.run(&request(settings, Trigger::Press), &host).unwrap();
+        assert_eq!(outcome.title.unwrap().chars().count(), MAX_TITLE_CHARS);
+        assert_eq!(outcome.color.as_deref(), Some("#112233"));
     }
 
     #[test]

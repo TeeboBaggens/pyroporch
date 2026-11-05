@@ -2,14 +2,14 @@
 
 use super::theme::{Palette, color_hex, parse_color};
 use super::crop::{CropDialog, CropResult, Opened, encode_png, open_picture};
-use super::{App, KeyId, SecretDialog, SecretTarget, hotkey};
+use super::{App, KeyId, KeyLook, SecretDialog, SecretTarget, hotkey};
 use eframe::egui::{self, Align2, Color32, CornerRadius, FontId, RichText, Sense, Stroke, StrokeKind, Ui, Vec2};
 use pyroporch_core::config::{BACK_SLOT, Key, MAX_FOLDER_DEPTH, Page, Preset, Profile, Step};
 use pyroporch_core::engine::{Block, SLEEP_ICON};
 use pyroporch_core::policy::Grants;
 use pyroporch_core::security::{find_refs, plaintext_findings, reference_name};
 use pyroporch_core::transfer::store_image;
-use pyroporch_sdk::{ActionSpec, Field, FieldKind, Risk, Trigger};
+use pyroporch_sdk::{ActionSpec, Field, FieldKind, Risk, Rule, RuleTest, Trigger};
 use serde_json::{Map, Value};
 use std::sync::Arc;
 use std::time::Duration;
@@ -21,6 +21,8 @@ const GRID_CHOICES: [(u32, u32); 6] = [(2, 3), (3, 3), (3, 5), (4, 5), (4, 8), (
 const COLOR_CHOICES: [&str; 10] = [
     "#2F6FDB", "#0F8B8D", "#2E8B57", "#7A4FD0", "#A83279", "#B4532A", "#C0392B", "#B8860B", "#3A4252", "#14171C",
 ];
+/// The ones a status is most likely to want, for a key that changes its look by itself.
+pub const STATUS_ICON_CHOICES: [&str; 6] = ["✅", "⚠", "❌", "🔥", "⛔", "❓"];
 const ICON_CHOICES: [&str; 24] = [
     "🔗", "🌐", "▶", "⏸", "🔊", "🔉", "🔇", "🎤", "📷", "⌨", "✏", "⚙", "🚀", "⭐", "💡", "🏠", "📁", "📄", "📅", "✉", "🔒", "➡", "⬅", "⏱",
 ];
@@ -422,7 +424,7 @@ impl App {
                 // The key is looked up once and drawn from where it is, not copied out.
                 let key = self.current_page().and_then(|page| page.key_at(row, col));
                 self.draw_key(ui, rect, row, col, &response, p, key);
-                let name = key.map_or_else(|| format!("Empty key {row} {col}"), |key| self.key_look(key).0);
+                let name = key.map_or_else(|| format!("Empty key {row} {col}"), |key| self.key_look(key).title);
                 response.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, true, &name));
                 if response.clicked() {
                     clicked = Some((row, col));
@@ -781,7 +783,7 @@ impl App {
             return;
         };
 
-        let (title, color_text) = self.key_look(key);
+        let KeyLook { title, icon, color: color_text } = self.key_look(key);
         let fill = parse_color(&color_text).unwrap_or(p.raised);
         let fill = if response.is_pointer_button_down_on() { fill.gamma_multiply(0.75) } else { fill };
         let mut text = parse_color(&key.text_color).unwrap_or_else(|| readable_on(fill));
@@ -801,18 +803,18 @@ impl App {
         let icon_y = rect.top() + rect.height() * if has_title { 0.38 } else { 0.5 };
         if on_picture {
             // The picture is the key's look, so the small icon stays out of its way.
-        } else if key.icon.starts_with(DRAWN_ICON_PREFIX) {
-            if let Some(texture) = self.drawn_icon(ui.ctx(), &key.icon) {
+        } else if icon.starts_with(DRAWN_ICON_PREFIX) {
+            if let Some(texture) = self.drawn_icon(ui.ctx(), &icon) {
                 let image_rect = egui::Rect::from_center_size(egui::pos2(rect.center().x, icon_y), Vec2::splat(icon_size * 1.5));
                 painter.image(texture, image_rect, egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)), Color32::WHITE);
             }
-        } else if key.icon.contains(['/', '\\']) || key.icon.ends_with(".png") || key.icon.ends_with(".jpg") {
-            if let Some(texture) = self.texture_for(ui.ctx(), &key.icon) {
+        } else if icon.contains(['/', '\\']) || icon.ends_with(".png") || icon.ends_with(".jpg") {
+            if let Some(texture) = self.texture_for(ui.ctx(), &icon) {
                 let image_rect = egui::Rect::from_center_size(egui::pos2(rect.center().x, icon_y), Vec2::splat(icon_size * 1.3));
                 painter.image(texture.id(), image_rect, egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)), Color32::WHITE);
             }
-        } else if !key.icon.is_empty() {
-            painter.text(egui::pos2(rect.center().x, icon_y), Align2::CENTER_CENTER, &key.icon, FontId::proportional(icon_size), text);
+        } else if !icon.is_empty() {
+            painter.text(egui::pos2(rect.center().x, icon_y), Align2::CENTER_CENTER, &icon, FontId::proportional(icon_size), text);
         }
         if has_title {
             let font = FontId::proportional((rect.width() * 0.125).clamp(9.0, 13.0));
@@ -1272,8 +1274,11 @@ impl App {
                         {
                             continue;
                         }
+                        if hidden_by_other_field(field, &spec.fields, &step.settings) {
+                            continue;
+                        }
                         let label = ui.label(&field.label).on_hover_text(&field.help);
-                        field_form(ui, field, label.id, &mut step.settings, &names, index, &id, new_secret);
+                        field_form(ui, field, label.id, &mut step.settings, &names, index, &id, new_secret, p);
                         ui.end_row();
                     }
                     if numbered && index > 0 {
@@ -1516,7 +1521,7 @@ fn color_row(ui: &mut Ui, value: &mut String, p: Palette) {
 
 /// Draws the right editor for one setting, from the plugin's description of it.
 #[allow(clippy::too_many_arguments)]
-fn field_form(ui: &mut Ui, field: &Field, label: egui::Id, settings: &mut Map<String, Value>, secrets: &[String], step: usize, id: &KeyId, new_secret: &mut Option<SecretTarget>) {
+fn field_form(ui: &mut Ui, field: &Field, label: egui::Id, settings: &mut Map<String, Value>, secrets: &[String], step: usize, id: &KeyId, new_secret: &mut Option<SecretTarget>, p: Palette) {
     let key = field.key.as_str();
     let width = 320.0_f32.min(ui.available_width() - 4.0);
     match &field.kind {
@@ -1592,6 +1597,74 @@ fn field_form(ui: &mut Ui, field: &Field, label: egui::Id, settings: &mut Map<St
             }
         }
         FieldKind::KeyValues => key_values_form(ui, key, label, settings, secrets, width),
+        FieldKind::Rules => rules_form(ui, key, label, settings, p),
+    }
+}
+
+/// Whether a field says to stay out of the way, given another field's value or what that starts as.
+fn hidden_by_other_field(field: &Field, fields: &[Field], settings: &Map<String, Value>) -> bool {
+    let Some((other, value)) = &field.hidden_when else {
+        return false;
+    };
+    let starts_as = || fields.iter().find(|f| f.key == *other).and_then(|f| f.default.as_str());
+    settings.get(other).and_then(Value::as_str).or_else(starts_as) == Some(value.as_str())
+}
+
+fn rules_form(ui: &mut Ui, key: &str, label: egui::Id, settings: &mut Map<String, Value>, p: Palette) {
+    let saved = settings.get(key).cloned().and_then(|rules| serde_json::from_value::<Vec<Rule>>(rules).ok());
+    let mut rules = saved.clone().unwrap_or_default();
+    let mut remove = None;
+    ui.vertical(|ui| {
+        // Rows that can't be read came from a file, and stay as they are until that's fixed.
+        if saved.is_none() && settings.get(key).is_some() {
+            ui.colored_label(p.warn, "⚠ These rules have a mistake. See the config file.");
+            return;
+        }
+        for (index, rule) in rules.iter_mut().enumerate() {
+            ui.push_id(index, |ui| {
+                ui.horizontal(|ui| {
+                    egui::ComboBox::from_id_salt("when").selected_text(rule.when.name()).width(96.0).show_ui(ui, |ui| {
+                        for test in RuleTest::ALL {
+                            ui.selectable_value(&mut rule.when, test, test.name());
+                        }
+                    })
+                    .response
+                    .labelled_by(label);
+                    if rule.when != RuleTest::AnythingElse {
+                        ui.add(egui::TextEdit::singleline(&mut rule.value).desired_width(76.0).hint_text("Value")).labelled_by(label);
+                    }
+                    ui.add(egui::TextEdit::singleline(&mut rule.icon).desired_width(30.0).hint_text("Icon")).labelled_by(label);
+                    ui.menu_button("Pick", |ui| {
+                        ui.set_max_width(210.0);
+                        ui.horizontal_wrapped(|ui| {
+                            for choice in STATUS_ICON_CHOICES.iter().chain(&ICON_CHOICES) {
+                                if ui.button(*choice).clicked() {
+                                    rule.icon = (*choice).into();
+                                    ui.close();
+                                }
+                            }
+                        });
+                    });
+                    color_row(ui, &mut rule.color, p);
+                    if ui.small_button("×").on_hover_text("Remove this rule").clicked() {
+                        remove = Some(index);
+                    }
+                });
+            });
+        }
+        if ui.small_button("+ Add rule").clicked() {
+            rules.push(Rule::default());
+        }
+    });
+    if let Some(index) = remove {
+        rules.remove(index);
+    }
+    if saved.as_ref().map_or(!rules.is_empty(), |saved| *saved != rules) {
+        if rules.is_empty() {
+            settings.remove(key);
+        } else if let Ok(rules) = serde_json::to_value(&rules) {
+            settings.insert(key.into(), rules);
+        }
     }
 }
 
