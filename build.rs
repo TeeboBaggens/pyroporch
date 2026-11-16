@@ -1,4 +1,5 @@
 //! Stamps each build, so a newly started copy can tell a running copy is out of date.
+// Temporary probe for a branch-ruleset check. This PR is closed, never merged.
 
 use std::time::{SystemTime, UNIX_EPOCH};
 
