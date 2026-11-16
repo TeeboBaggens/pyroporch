@@ -18,10 +18,14 @@ pub const RELEASES_PAGE: &str = "https://github.com/TeeboBaggens/pyroporch/relea
 /// How long to wait between checks, when the person has asked for them.
 pub const CHECK_EVERY_SECONDS: u64 = 6 * 60 * 60;
 /// The public half of the release key. The release workflow refuses to publish with a key that
-/// doesn't match this.
+/// doesn't match this, and `docs/release-key.pem` holds the same key in the form `openssl` reads,
+/// for anyone checking a download by hand.
 const SIGNING_KEY_HEX: &str = "3c348e6c10788c868fd95e5152470c2622bca34e785ac40f9f918477bac1a555";
 const SUMS_FILE: &str = "SHA256SUMS";
 const SIGNATURE_FILE: &str = "SHA256SUMS.sig";
+/// How long an Ed25519 signature is, and the only length there is. Anything else is a damaged or
+/// wrong file rather than a signature that doesn't match, which is worth telling apart.
+const SIGNATURE_BYTES: usize = 64;
 /// Far bigger than a package is, so a bad answer can't fill the disk.
 const MAX_DOWNLOAD_BYTES: u64 = 200 * 1024 * 1024;
 const CHECK_TIMEOUT: Duration = Duration::from_secs(30);
@@ -119,6 +123,9 @@ fn signing_key() -> Vec<u8> {
 
 /// The fingerprint `SHA256SUMS` gives this file, once its signature has been checked.
 fn signed_fingerprint(sums: &[u8], signature: &[u8], key: &[u8], package: &str) -> Result<String, String> {
+    if signature.len() != SIGNATURE_BYTES {
+        return Err(format!("the signature on this release is {} bytes rather than {SIGNATURE_BYTES}, so it isn't a signature. The download may have been cut short; try again.", signature.len()));
+    }
     UnparsedPublicKey::new(&ED25519, key)
         .verify(sums, signature)
         .map_err(|_| "this download isn't signed by the release key, so it wasn't used".to_string())?;
@@ -355,9 +362,16 @@ mod tests {
         let error = try_it(&files(&release, b"something else".to_vec(), forged, stranger));
         assert!(error.contains("isn't signed"), "{error}");
 
-        // No signature at all.
-        let error = try_it(&files(&release, b"the package".to_vec(), sums, Vec::new()));
+        // A signature of the right length, but nothing in it.
+        let error = try_it(&files(&release, b"the package".to_vec(), sums.clone(), vec![0; SIGNATURE_BYTES]));
         assert!(error.contains("isn't signed"), "{error}");
+
+        // A file that isn't a signature at all says so, rather than blaming the key: what went
+        // wrong is the download, and doing it again is the fix.
+        for not_a_signature in [Vec::new(), vec![0; SIGNATURE_BYTES - 1], vec![0; SIGNATURE_BYTES + 1], b"not a signature".to_vec()] {
+            let error = try_it(&files(&release, b"the package".to_vec(), sums.clone(), not_a_signature));
+            assert!(error.contains("isn't a signature"), "{error}");
+        }
 
         // A real signed list from an older release doesn't vouch for this one.
         let old_sums = format!("{}  {}\n", sha256_hex(b"the package"), package_name("1.0.0").unwrap());
@@ -371,6 +385,21 @@ mod tests {
     #[test]
     fn the_built_in_key_is_a_whole_key() {
         assert_eq!(signing_key().len(), 32);
+    }
+
+    /// The key in the docs is what someone checking a download by hand trusts, so it has to be the
+    /// same key the app itself checks with.
+    #[test]
+    fn the_key_in_the_docs_is_the_built_in_key() {
+        use base64::Engine as _;
+        let pem = include_str!("../../../docs/release-key.pem");
+        let body: String = pem.lines().filter(|line| !line.starts_with("-----")).collect();
+        let der = base64::engine::general_purpose::STANDARD.decode(body).expect("docs/release-key.pem isn't base64");
+        // An Ed25519 public key written this way is always this header and then the key itself.
+        let header: [u8; 12] = [0x30, 0x2a, 0x30, 0x05, 0x06, 0x03, 0x2b, 0x65, 0x70, 0x03, 0x21, 0x00];
+        assert_eq!(der.len(), header.len() + 32);
+        assert_eq!(der[..header.len()], header);
+        assert_eq!(der[header.len()..], *signing_key());
     }
 
     #[test]

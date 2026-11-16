@@ -146,7 +146,7 @@ jobs:
       - name: Write the checksums
         working-directory: dist
         run: sha256sum -- * > SHA256SUMS
-      - name: Sign the checksums, which is what the app's updater trusts
+      - name: Sign and check the checksums, which is what the app's updater trusts
         env:
           UPDATE_SIGNING_KEY: ${{ secrets.UPDATE_SIGNING_KEY }}
         run: |
@@ -157,6 +157,11 @@ jobs:
           public=$(openssl pkey -in "$key" -pubout -outform DER | tail -c 32 | od -An -tx1 | tr -d ' \n')
           grep -q "\"$public\"" crates/core/src/update.rs || { echo "::error::UPDATE_SIGNING_KEY doesn't match the key in crates/core/src/update.rs."; exit 1; }
           openssl pkeyutl -sign -inkey "$key" -rawin -in dist/SHA256SUMS -out dist/SHA256SUMS.sig
+          # Signing without checking could publish a signature no copy of the app can use. This
+          # checks it the way a person would, against the key file in the repo, so that the key
+          # people trust and the key that signed are proven to be a pair.
+          openssl pkeyutl -verify -pubin -inkey docs/release-key.pem -rawin -in dist/SHA256SUMS -sigfile dist/SHA256SUMS.sig \
+            || { echo "::error::The signature doesn't check out against docs/release-key.pem."; exit 1; }
       - uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
         with:
           subject-path: dist/*
