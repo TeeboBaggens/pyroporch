@@ -21,7 +21,18 @@ The builds aren't signed by Apple or Microsoft yet, so the system warns about th
 - **macOS:** open the app, then choose **Open Anyway** under System Settings > Privacy & Security.
 - **Windows:** choose **More info**, then **Run anyway**.
 
-To check a download, compare it with `SHA256SUMS` on the release, or run
+To check a download, check the signature on `SHA256SUMS` and then your file against it. Save
+[`release-key.pem`](docs/release-key.pem) from this repo next to your download, along with
+`SHA256SUMS` and `SHA256SUMS.sig` from the release. Take the key from here rather than from the
+release itself, which would be the same place as the files it vouches for. Then:
+
+```sh
+openssl pkeyutl -verify -pubin -inkey release-key.pem -rawin -in SHA256SUMS -sigfile SHA256SUMS.sig
+sha256sum --ignore-missing -c SHA256SUMS    # on a Mac: shasum -a 256 --ignore-missing -c SHA256SUMS
+```
+
+The first has to say `Signature Verified Successfully` and the second `OK`, and those are the same two
+things the app's updater checks before it replaces anything. You can also run
 `gh attestation verify <file> --repo TeeboBaggens/pyroporch` to confirm GitHub built it from this repo.
 For an assistant on a Mac, the program to point at is `Pyro Porch.app/Contents/MacOS/pyroporch`.
 

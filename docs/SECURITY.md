@@ -74,6 +74,11 @@ carries a signature from the release key, whose public half is built into the ap
 fingerprint, and that the new program runs and reports the right version. If any of that fails, nothing changes. Builds
 made by hand never replace themselves. An assistant can't turn checking on or install anything.
 
+The signature is Ed25519, and `docs/release-key.pem` is the same public half in the form `openssl` reads, so you can
+run the first two of those checks by hand on any download. [The README](../README.md#run-it) has the commands. The
+release workflow checks its own signature against that file before publishing, so the key you verify with and the key
+that signed are always a pair.
+
 The private key is kept as a secret for the release workflow, so anyone who could take over that workflow could sign a
 release. On a Mac, an updated app can lose its Accessibility permission, because builds aren't signed by Apple yet, so
 keys that press keyboard keys may need it given again.
